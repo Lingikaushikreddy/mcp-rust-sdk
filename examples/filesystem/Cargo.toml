@@ -1,0 +1,14 @@
+[package]
+name = "mcp-example-filesystem"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+mcp-sdk = { path = "../../crates/mcp-sdk", features = ["full"] }
+tokio = { workspace = true, features = ["fs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
