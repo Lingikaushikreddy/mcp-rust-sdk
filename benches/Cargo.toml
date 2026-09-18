@@ -1,0 +1,24 @@
+[package]
+name = "mcp-benchmarks"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bench]]
+name = "throughput"
+harness = false
+path = "src/throughput.rs"
+
+[[bench]]
+name = "memory"
+harness = false
+path = "src/memory.rs"
+
+[dependencies]
+mcp-sdk = { path = "../crates/mcp-sdk", features = ["full"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
