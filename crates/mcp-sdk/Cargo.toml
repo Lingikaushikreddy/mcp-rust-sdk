@@ -1,0 +1,37 @@
+[package]
+name = "mcp-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "A high-performance Rust SDK for building Model Context Protocol (MCP) servers"
+
+[features]
+default = ["macros", "stdio"]
+macros = ["dep:mcp-macros"]
+stdio = []
+http = ["dep:axum", "dep:tower", "dep:tower-http", "dep:uuid"]
+sse = ["http"]
+full = ["macros", "stdio", "http", "sse"]
+
+[dependencies]
+mcp-macros = { path = "../mcp-macros", optional = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }
