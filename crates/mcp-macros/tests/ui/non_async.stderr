@@ -1,0 +1,5 @@
+error: #[mcp_tool] can only be applied to async functions
+ --> tests/ui/non_async.rs:6:1
+  |
+6 | fn not_async() -> Result<CallToolResult, ToolError> {
+  | ^^
