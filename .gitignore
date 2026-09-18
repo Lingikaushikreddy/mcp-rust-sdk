@@ -1,0 +1,32 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo lock for libraries (keep for workspace)
+# Cargo.lock is committed for reproducible builds
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# Coverage reports
+*.profraw
+lcov.info
+tarpaulin-report.html
+
+# Benchmark baselines (generated)
+target/criterion/
+
+# Documentation build
+/doc/
