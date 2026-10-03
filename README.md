@@ -9,6 +9,7 @@ documentation, tests, and benchmarks as fixtures.
 
 [![CI](https://github.com/Lingikaushikreddy/mcp-rust-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Lingikaushikreddy/mcp-rust-sdk/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![M8ven Score](https://m8ven.ai/badge/mcp/lingikaushikreddy/mcp-rust-sdk)](https://m8ven.ai/mcp/lingikaushikreddy/mcp-rust-sdk?s=readme)
 
 > **Status:** early development (0.1.0). Not published to crates.io yet -- the
 > `mcp-sdk` name there belongs to an unrelated project, so depend on this repo via git.
