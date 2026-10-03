@@ -68,6 +68,10 @@ use crate::types::error::ToolError;
 ///     }
 /// }
 /// ```
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to its generated Future-returning methods"
+)]
 #[async_trait]
 pub trait ToolHandler: Send + Sync + 'static {
     /// Returns the metadata for this tool.

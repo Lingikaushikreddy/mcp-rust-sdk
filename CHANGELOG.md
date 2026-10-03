@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `#[mcp_tool]` annotation arguments, including explicit boolean values; the existing bare `destructive` flag now emits `destructiveHint: true`.
 - Explicit behavior annotations for every calculator, filesystem, and database example tool, with an annotation guide in the README.
 
+### Fixed
+
+- Keep Clippy compatible with newer Rust versions by allowing only the redundant `must_use` attributes generated on async handler and transport traits.
+
 ### Migration
 
 - Existing Rust `ToolInfo` struct literals must add `annotations: None` or `Some(ToolAnnotations { ... })`. JSON metadata without annotations remains supported, and absent fields stay omitted.
