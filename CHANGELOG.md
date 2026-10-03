@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Keep Clippy compatible with newer Rust versions by allowing only the redundant `must_use` attributes generated on async handler and transport traits.
+- Compare empty registry results directly in tests so failures display unexpected contents and satisfy newer Clippy diagnostics.
 
 ### Migration
 

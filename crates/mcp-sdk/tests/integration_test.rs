@@ -202,5 +202,5 @@ async fn test_multiple_sequential_tool_calls() {
 async fn test_graceful_eof() {
     let input = init_handshake();
     let output = run_server_with_input(&input).await;
-    assert!(!output.is_empty()); // Should at least have initialize response
+    assert_ne!(output, Vec::<u8>::new()); // Should at least have initialize response
 }

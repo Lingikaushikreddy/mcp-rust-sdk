@@ -238,8 +238,11 @@ mod tests {
         let registry = ResourceRegistry::new();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
-        assert!(registry.list().is_empty());
-        assert!(registry.list_templates().is_empty());
+        assert_eq!(registry.list(), Vec::<ResourceInfo>::new());
+        assert_eq!(
+            registry.list_templates(),
+            Vec::<ResourceTemplateInfo>::new()
+        );
     }
 
     struct StaticResource;
