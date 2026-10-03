@@ -1,0 +1,23 @@
+error: expected a boolean literal (`true` or `false`) for `read_only_hint`
+ --> tests/ui/tool_annotations/non_boolean_hints.rs:7:29
+  |
+7 | #[mcp_tool(read_only_hint = "true")]
+  |                             ^^^^^^
+
+error: expected a boolean literal (`true` or `false`) for `destructive_hint`
+  --> tests/ui/tool_annotations/non_boolean_hints.rs:12:31
+   |
+12 | #[mcp_tool(destructive_hint = 1)]
+   |                               ^
+
+error: expected a boolean literal (`true` or `false`) for `idempotent_hint`
+  --> tests/ui/tool_annotations/non_boolean_hints.rs:17:30
+   |
+17 | #[mcp_tool(idempotent_hint = enabled)]
+   |                              ^^^^^^^
+
+error: expected a boolean literal (`true` or `false`) for `open_world_hint`
+  --> tests/ui/tool_annotations/non_boolean_hints.rs:22:30
+   |
+22 | #[mcp_tool(open_world_hint = true || false)]
+   |                              ^^^^^^^^^^^^^

@@ -2,6 +2,11 @@
 
 A Rust SDK for building [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers.
 
+The SDK provides protocol types, handler traits, transports, and a server builder.
+The calculator, filesystem, and database servers in `examples/` demonstrate those
+APIs; applications define and register their own tools. Echo handlers appear in
+documentation, tests, and benchmarks as fixtures.
+
 [![CI](https://github.com/Lingikaushikreddy/mcp-rust-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Lingikaushikreddy/mcp-rust-sdk/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
@@ -46,6 +51,13 @@ impl ToolHandler for AddTool {
                 .required("a")
                 .required("b")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -78,7 +90,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 use mcp_sdk::prelude::*;
 
-#[mcp_tool(description = "Add two numbers")]
+#[mcp_tool(
+    description = "Add two numbers",
+    title = "Add numbers",
+    read_only_hint = true,
+    destructive_hint = false,
+    idempotent_hint = true,
+    open_world_hint = false
+)]
 async fn add(a: f64, b: f64) -> Result<CallToolResult, ToolError> {
     Ok(CallToolResult::text((a + b).to_string()))
 }
@@ -95,6 +114,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Tool Annotations
+
+`ToolInfo.annotations` adds optional metadata to `tools/list` responses. Manual
+handlers return `Some(ToolAnnotations { ... })` as shown above; the macro accepts
+a string literal for `title` and boolean literals for the four hints. Rust field
+and macro argument names use snake_case; JSON hint names use camelCase.
+
+The [MCP annotation definitions](https://modelcontextprotocol.io/specification/2025-11-25/schema#toolannotations)
+describe these fields:
+
+| Rust field | JSON field | Meaning | MCP default when omitted |
+|------------|------------|---------|--------------------------|
+| `title` | `title` | Display title | No annotation title |
+| `read_only_hint` | `readOnlyHint` | Does not modify its environment | `false` |
+| `destructive_hint` | `destructiveHint` | May delete or overwrite state | `true` |
+| `idempotent_hint` | `idempotentHint` | Repeating the same arguments has no additional effect on the environment | `false` |
+| `open_world_hint` | `openWorldHint` | May interact with an open domain of external entities | `true` |
+
+`destructiveHint` and `idempotentHint` are meaningful when `readOnlyHint` is false.
+Idempotence concerns effects on the environment; repeated calls may return
+different messages. For example, `db_delete` is idempotent even when a second
+call reports that the key is absent. `db_set` is destructive because it can
+overwrite an existing value.
+
+Annotations are hints supplied by the server. Clients should not base tool use
+decisions on annotations from untrusted servers. The SDK serializes them without
+enforcing read access, restricting writes, or adding authorization checks.
+
+The SDK preserves optionality: `ToolAnnotations::default()` leaves every field
+as `None`, and `annotations: None` omits the entire object. A hint set to
+`Some(false)` is included in JSON. The SDK does not fill in the MCP defaults or
+infer hints from tool names or handler behavior. Macros without annotation
+arguments also leave the object absent. The existing bare `destructive` macro
+argument is supported as shorthand for `destructive_hint = true`.
+Use either `destructive` or `destructive_hint`; combining them is rejected.
+Unknown options, duplicate options, and hint values other than boolean literals
+produce compile errors so misspelled metadata cannot be silently discarded.
+
+The example tools declare all four boolean hints. Calculator tools and filesystem
+reads declare a closed domain; filesystem paths are checked against the configured
+base directory. Database tools operate on the server's in-memory store.
+
+#### Migrating Manual Handlers
+
+Adding `annotations` is a source-breaking change for existing Rust `ToolInfo`
+struct literals: they must add the field. To keep metadata absent, use:
+
+```rust
+use mcp_sdk::prelude::*;
+
+let info = ToolInfo {
+    name: "custom_tool".to_string(),
+    description: None,
+    input_schema: JsonSchemaBuilder::new().build(),
+    annotations: None,
+};
+```
+
+Use `Some(ToolAnnotations { ... })` to describe a tool's behavior. Existing JSON
+metadata without annotations remains valid, and `None` preserves its omission
+on the wire.
 
 ## Architecture
 
@@ -186,7 +267,7 @@ See [AUDIT_REPORT.md](AUDIT_REPORT.md) for the full list of open items.
 
 ## Supported MCP Protocol Versions
 
-- **2025-11-25** -- Full support (primary target)
+- **2025-11-25** -- primary target
 - **2024-11-05** -- accepted during version negotiation
 
 ## License

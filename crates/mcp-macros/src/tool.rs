@@ -8,17 +8,22 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse2, ItemFn};
+use syn::parse::{Parse, ParseStream};
+use syn::{parse2, Expr, Ident, ItemFn, Lit, Token};
 
 use crate::schema::{extract_param_schemas, generate_input_schema};
-use crate::utils::{extract_doc_comments, extract_param_info, to_pascal_case, McpAttrArgs};
+use crate::utils::{extract_doc_comments, extract_param_info, to_pascal_case};
 
 /// Attribute arguments for `#[mcp_tool]`.
-#[allow(dead_code)]
+#[derive(Default)]
 struct ToolAttrs {
     name: Option<String>,
     description: Option<String>,
-    destructive: bool,
+    title: Option<String>,
+    read_only_hint: Option<bool>,
+    destructive_hint: Option<bool>,
+    idempotent_hint: Option<bool>,
+    open_world_hint: Option<bool>,
 }
 
 /// Expands the `#[mcp_tool]` attribute macro.
@@ -41,8 +46,8 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         ));
     }
 
-    // Parse attributes using proper syn parsing
-    let attrs = parse_tool_attrs(attr)?;
+    let attrs: ToolAttrs = parse2(attr)?;
+    let annotations_token = generate_annotations(&attrs);
 
     let fn_name = &input_fn.sig.ident;
     let fn_name_str = attrs.name.unwrap_or_else(|| fn_name.to_string());
@@ -128,6 +133,7 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     name: #fn_name_str.to_string(),
                     description: #description_token,
                     input_schema: #input_schema,
+                    annotations: #annotations_token,
                 }
             }
 
@@ -156,24 +162,141 @@ pub fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     Ok(expanded)
 }
 
-/// Parses tool attributes using proper `syn::Parse` implementation.
-///
-/// This correctly handles descriptions containing commas, quotes,
-/// and other special characters.
-fn parse_tool_attrs(attr: TokenStream) -> syn::Result<ToolAttrs> {
-    if attr.is_empty() {
-        return Ok(ToolAttrs {
-            name: None,
-            description: None,
-            destructive: false,
-        });
+impl Parse for ToolAttrs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut attrs = Self::default();
+
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            match key.to_string().as_str() {
+                "name" => parse_string_option(input, &key, &mut attrs.name)?,
+                "description" => parse_string_option(input, &key, &mut attrs.description)?,
+                "title" => parse_string_option(input, &key, &mut attrs.title)?,
+                "read_only_hint" => parse_bool_option(input, &key, &mut attrs.read_only_hint)?,
+                "destructive_hint" => parse_bool_option(input, &key, &mut attrs.destructive_hint)?,
+                "idempotent_hint" => parse_bool_option(input, &key, &mut attrs.idempotent_hint)?,
+                "open_world_hint" => parse_bool_option(input, &key, &mut attrs.open_world_hint)?,
+                "destructive" => {
+                    if input.peek(Token![=]) {
+                        return Err(syn::Error::new_spanned(
+                            key,
+                            "`destructive` is a bare flag; use `destructive_hint = true` or `destructive_hint = false`",
+                        ));
+                    }
+                    reject_duplicate(&key, &attrs.destructive_hint)?;
+                    attrs.destructive_hint = Some(true);
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &key,
+                        format!("unknown #[mcp_tool] option `{key}`"),
+                    ));
+                }
+            }
+
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(attrs)
+    }
+}
+
+fn reject_duplicate<T>(key: &Ident, slot: &Option<T>) -> syn::Result<()> {
+    if slot.is_some() {
+        let message = if key == "destructive" || key == "destructive_hint" {
+            "duplicate `destructive_hint` option; `destructive` is its legacy alias".to_string()
+        } else {
+            format!("duplicate `{key}` option")
+        };
+        return Err(syn::Error::new_spanned(key, message));
+    }
+    Ok(())
+}
+
+fn parse_option_value(input: ParseStream<'_>, key: &Ident) -> syn::Result<Expr> {
+    if !input.peek(Token![=]) {
+        return Err(syn::Error::new_spanned(
+            key,
+            format!("expected a value for `{key}` using `{key} = ...`"),
+        ));
+    }
+    input.parse::<Token![=]>()?;
+    input.parse()
+}
+
+fn parse_string_option(
+    input: ParseStream<'_>,
+    key: &Ident,
+    slot: &mut Option<String>,
+) -> syn::Result<()> {
+    reject_duplicate(key, slot)?;
+    let value = parse_option_value(input, key)?;
+    if let Expr::Lit(expr) = &value {
+        if let Lit::Str(value) = &expr.lit {
+            *slot = Some(value.value());
+            return Ok(());
+        }
+    }
+    Err(syn::Error::new_spanned(
+        value,
+        format!("expected a string literal for `{key}`"),
+    ))
+}
+
+fn parse_bool_option(
+    input: ParseStream<'_>,
+    key: &Ident,
+    slot: &mut Option<bool>,
+) -> syn::Result<()> {
+    reject_duplicate(key, slot)?;
+    let value = parse_option_value(input, key)?;
+    if let Expr::Lit(expr) = &value {
+        if let Lit::Bool(value) = &expr.lit {
+            *slot = Some(value.value);
+            return Ok(());
+        }
+    }
+    Err(syn::Error::new_spanned(
+        value,
+        format!("expected a boolean literal (`true` or `false`) for `{key}`"),
+    ))
+}
+
+fn generate_annotations(attrs: &ToolAttrs) -> TokenStream {
+    if attrs.title.is_none()
+        && attrs.read_only_hint.is_none()
+        && attrs.destructive_hint.is_none()
+        && attrs.idempotent_hint.is_none()
+        && attrs.open_world_hint.is_none()
+    {
+        return quote! { None };
     }
 
-    let args: McpAttrArgs = syn::parse2(attr)?;
+    let title = match &attrs.title {
+        Some(title) => quote! { Some(#title.to_string()) },
+        None => quote! { None },
+    };
+    let read_only_hint = option_bool_tokens(attrs.read_only_hint);
+    let destructive_hint = option_bool_tokens(attrs.destructive_hint);
+    let idempotent_hint = option_bool_tokens(attrs.idempotent_hint);
+    let open_world_hint = option_bool_tokens(attrs.open_world_hint);
 
-    Ok(ToolAttrs {
-        name: args.get_str("name").map(String::from),
-        description: args.get_str("description").map(String::from),
-        destructive: args.has_flag("destructive"),
-    })
+    quote! {
+        Some(mcp_sdk::protocol::messages::ToolAnnotations {
+            title: #title,
+            read_only_hint: #read_only_hint,
+            destructive_hint: #destructive_hint,
+            idempotent_hint: #idempotent_hint,
+            open_world_hint: #open_world_hint,
+        })
+    }
+}
+
+fn option_bool_tokens(value: Option<bool>) -> TokenStream {
+    match value {
+        Some(value) => quote! { Some(#value) },
+        None => quote! { None },
+    }
 }

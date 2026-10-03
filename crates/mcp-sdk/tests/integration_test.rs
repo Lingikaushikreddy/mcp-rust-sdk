@@ -16,6 +16,13 @@ struct AddTool;
 impl ToolHandler for AddTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
+            annotations: Some(mcp_sdk::ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
             name: "add".to_string(),
             description: Some("Add two numbers".to_string()),
             input_schema: JsonSchemaBuilder::new()
@@ -50,6 +57,13 @@ struct FailTool;
 impl ToolHandler for FailTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
+            annotations: Some(mcp_sdk::ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
             name: "fail".to_string(),
             description: Some("Always fails".to_string()),
             input_schema: JsonSchemaBuilder::new().build(),

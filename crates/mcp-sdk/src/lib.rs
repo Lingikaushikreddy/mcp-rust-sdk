@@ -28,6 +28,13 @@
 //! impl ToolHandler for AddTool {
 //!     fn info(&self) -> ToolInfo {
 //!         ToolInfo {
+//!             annotations: Some(mcp_sdk::ToolAnnotations {
+//!                 read_only_hint: Some(true),
+//!                 destructive_hint: Some(false),
+//!                 idempotent_hint: Some(true),
+//!                 open_world_hint: Some(false),
+//!                 ..Default::default()
+//!             }),
 //!             name: "add".to_string(),
 //!             description: Some("Add two numbers".to_string()),
 //!             input_schema: JsonSchemaBuilder::new()
@@ -121,7 +128,7 @@ pub mod types;
 // Re-export key types at the crate root for convenience
 pub use context::ToolContext;
 pub use protocol::capabilities::{ServerCapabilities, PROTOCOL_VERSION};
-pub use protocol::messages::ToolInfo;
+pub use protocol::messages::{ToolAnnotations, ToolInfo};
 pub use server::McpServer;
 pub use transport::McpTransport;
 pub use types::content::{CallToolResult, Content, PromptMessage, ResourceContent};

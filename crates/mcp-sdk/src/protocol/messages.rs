@@ -67,6 +67,62 @@ pub struct PingResult {}
 // Tools
 // ---------------------------------------------------------------------------
 
+/// Optional descriptions of a tool's behavior, as defined by MCP.
+///
+/// These are hints, not permissions or guarantees. Clients must not use hints
+/// from untrusted servers as authorization to execute a tool.
+///
+/// An unspecified hint stays absent on the wire. MCP defines the conservative
+/// defaults as: read-only false, destructive true, idempotent false, and
+/// open-world true. [`Default`] does not invent explicit declarations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    /// A human-readable display title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// True when the tool does not modify its environment. MCP default: false.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_hint"
+    )]
+    pub read_only_hint: Option<bool>,
+    /// True when updates may destroy or overwrite state. MCP default: true.
+    /// Only meaningful for tools that modify their environment.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_hint"
+    )]
+    pub destructive_hint: Option<bool>,
+    /// True when repeated identical calls cause no additional environment effects.
+    /// MCP default: false. Only meaningful for tools that modify their environment.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_hint"
+    )]
+    pub idempotent_hint: Option<bool>,
+    /// True when the tool interacts with an open world of external entities.
+    /// MCP default: true. A tool confined to a local database has a closed world.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_hint"
+    )]
+    pub open_world_hint: Option<bool>,
+}
+
+// Missing values use serde's field default; present values must be booleans,
+// including rejecting null instead of silently treating it as an omission.
+fn deserialize_hint<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bool::deserialize(deserializer).map(Some)
+}
+
 /// Metadata about a registered tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolInfo {
@@ -78,6 +134,9 @@ pub struct ToolInfo {
     /// The JSON Schema describing the tool's input parameters.
     #[serde(rename = "inputSchema")]
     pub input_schema: serde_json::Value,
+    /// Optional behavioral hints. Omitted when the publisher has not declared them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
 }
 
 /// Parameters for the `tools/list` request.
@@ -395,6 +454,7 @@ mod tests {
     #[test]
     fn test_tool_info_serialization() {
         let tool = ToolInfo {
+            annotations: None,
             name: "calculate".to_string(),
             description: Some("Do math".to_string()),
             input_schema: serde_json::json!({

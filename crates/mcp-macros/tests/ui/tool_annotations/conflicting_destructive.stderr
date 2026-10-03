@@ -1,0 +1,11 @@
+error: duplicate `destructive_hint` option; `destructive` is its legacy alias
+ --> tests/ui/tool_annotations/conflicting_destructive.rs:7:25
+  |
+7 | #[mcp_tool(destructive, destructive_hint = false)]
+  |                         ^^^^^^^^^^^^^^^^
+
+error: duplicate `destructive_hint` option; `destructive` is its legacy alias
+  --> tests/ui/tool_annotations/conflicting_destructive.rs:12:38
+   |
+12 | #[mcp_tool(destructive_hint = false, destructive)]
+   |                                      ^^^^^^^^^^^

@@ -1,0 +1,29 @@
+error: duplicate `read_only_hint` option
+ --> tests/ui/tool_annotations/duplicate_options.rs:7:35
+  |
+7 | #[mcp_tool(read_only_hint = true, read_only_hint = false)]
+  |                                   ^^^^^^^^^^^^^^
+
+error: duplicate `title` option
+  --> tests/ui/tool_annotations/duplicate_options.rs:12:29
+   |
+12 | #[mcp_tool(title = "First", title = "Second")]
+   |                             ^^^^^
+
+error: duplicate `name` option
+  --> tests/ui/tool_annotations/duplicate_options.rs:17:28
+   |
+17 | #[mcp_tool(name = "first", name = "second")]
+   |                            ^^^^
+
+error: duplicate `description` option
+  --> tests/ui/tool_annotations/duplicate_options.rs:22:35
+   |
+22 | #[mcp_tool(description = "First", description = "Second")]
+   |                                   ^^^^^^^^^^^
+
+error: duplicate `destructive_hint` option; `destructive` is its legacy alias
+  --> tests/ui/tool_annotations/duplicate_options.rs:27:25
+   |
+27 | #[mcp_tool(destructive, destructive)]
+   |                         ^^^^^^^^^^^

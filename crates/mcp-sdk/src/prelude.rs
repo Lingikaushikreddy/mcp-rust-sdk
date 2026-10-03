@@ -14,7 +14,7 @@ pub use crate::protocol::capabilities::{ServerCapabilities, ServerCapabilitiesBu
 pub use crate::protocol::messages::{
     CallToolParams, GetPromptParams, GetPromptResult, Implementation, InitializeParams,
     InitializeResult, ListToolsResult, PromptArgument, PromptInfo, ResourceInfo,
-    ResourceTemplateInfo, ToolInfo,
+    ResourceTemplateInfo, ToolAnnotations, ToolInfo,
 };
 pub use crate::protocol::types::{JsonRpcMessage, RequestId};
 pub use crate::schema::JsonSchemaBuilder;

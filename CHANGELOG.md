@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional `ToolInfo.annotations` and `ToolAnnotations` with a title and the four MCP behavior hints.
+- `#[mcp_tool]` annotation arguments, including explicit boolean values; the existing bare `destructive` flag now emits `destructiveHint: true`.
+- Explicit behavior annotations for every calculator, filesystem, and database example tool, with an annotation guide in the README.
+
+### Migration
+
+- Existing Rust `ToolInfo` struct literals must add `annotations: None` or `Some(ToolAnnotations { ... })`. JSON metadata without annotations remains supported, and absent fields stay omitted.
+- The tool macro now rejects unknown or duplicate options and malformed annotation values instead of silently ignoring them.
+
 ## [0.1.0] - 2026-03-13
 
 ### Added

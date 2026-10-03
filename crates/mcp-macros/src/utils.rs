@@ -142,13 +142,6 @@ impl McpAttrArgs {
             }
         })
     }
-
-    /// Returns whether a bare identifier is present.
-    pub fn has_flag(&self, key: &str) -> bool {
-        self.entries
-            .iter()
-            .any(|(k, v)| k == key && matches!(v, AttrValue::Ident))
-    }
 }
 
 impl syn::parse::Parse for McpAttrArgs {

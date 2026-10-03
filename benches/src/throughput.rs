@@ -19,6 +19,13 @@ struct EchoTool;
 impl ToolHandler for EchoTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
+            annotations: Some(mcp_sdk::ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
             name: "echo".to_string(),
             description: Some("Echo tool for benchmarking".to_string()),
             input_schema: JsonSchemaBuilder::new()
@@ -49,6 +56,13 @@ fn bench_tool_list(c: &mut Criterion) {
         impl ToolHandler for NumTool {
             fn info(&self) -> ToolInfo {
                 ToolInfo {
+                    annotations: Some(mcp_sdk::ToolAnnotations {
+                        read_only_hint: Some(true),
+                        destructive_hint: Some(false),
+                        idempotent_hint: Some(true),
+                        open_world_hint: Some(false),
+                        ..Default::default()
+                    }),
                     name: format!("tool_{}", self.0),
                     description: Some(format!("Tool number {}", self.0)),
                     input_schema: serde_json::json!({"type": "object"}),
