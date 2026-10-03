@@ -20,6 +20,13 @@ struct BenchTool {
 impl ToolHandler for BenchTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
+            annotations: Some(mcp_sdk::ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
             name: self.name.clone(),
             description: Some(format!("Benchmark tool: {}", self.name)),
             input_schema: serde_json::json!({

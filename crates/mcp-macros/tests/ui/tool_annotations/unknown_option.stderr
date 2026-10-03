@@ -1,0 +1,5 @@
+error: unknown #[mcp_tool] option `readonly_hint`
+ --> tests/ui/tool_annotations/unknown_option.rs:7:12
+  |
+7 | #[mcp_tool(readonly_hint = "true")]
+  |            ^^^^^^^^^^^^^

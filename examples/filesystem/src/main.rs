@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use mcp_sdk::context::ToolContext;
 use mcp_sdk::handler::resources::ResourceHandler;
 use mcp_sdk::handler::tools::ToolHandler;
-use mcp_sdk::protocol::messages::{ResourceInfo, ResourceTemplateInfo, ToolInfo};
+use mcp_sdk::protocol::messages::{ResourceInfo, ResourceTemplateInfo, ToolAnnotations, ToolInfo};
 use mcp_sdk::schema::JsonSchemaBuilder;
 use mcp_sdk::server::McpServer;
 use mcp_sdk::transport::stdio::StdioTransport;
@@ -75,6 +75,13 @@ impl ToolHandler for ReadFileTool {
                 )
                 .required("path")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -120,6 +127,13 @@ impl ToolHandler for ListDirectoryTool {
                 )
                 .required("path")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -196,6 +210,13 @@ impl ToolHandler for SearchFilesTool {
                 .required("path")
                 .required("query")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 

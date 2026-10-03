@@ -12,7 +12,9 @@ use mcp_sdk::context::ToolContext;
 use mcp_sdk::handler::prompts::PromptHandler;
 use mcp_sdk::handler::resources::ResourceHandler;
 use mcp_sdk::handler::tools::ToolHandler;
-use mcp_sdk::protocol::messages::{PromptArgument, PromptInfo, ResourceInfo, ToolInfo};
+use mcp_sdk::protocol::messages::{
+    PromptArgument, PromptInfo, ResourceInfo, ToolAnnotations, ToolInfo,
+};
 use mcp_sdk::schema::JsonSchemaBuilder;
 use mcp_sdk::server::McpServer;
 use mcp_sdk::transport::stdio::StdioTransport;
@@ -51,6 +53,14 @@ impl ToolHandler for DbSetTool {
                 .required("key")
                 .required("value")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(false),
+                // Setting a key can overwrite its previous value.
+                destructive_hint: Some(true),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -101,6 +111,13 @@ impl ToolHandler for DbGetTool {
                 )
                 .required("key")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -148,6 +165,14 @@ impl ToolHandler for DbDeleteTool {
                 )
                 .required("key")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(false),
+                destructive_hint: Some(true),
+                // Repeating a deletion leaves the same key absent.
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -185,6 +210,13 @@ impl ToolHandler for DbListTool {
             name: "db_list".to_string(),
             description: Some("List all keys in the database".to_string()),
             input_schema: JsonSchemaBuilder::new().build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 

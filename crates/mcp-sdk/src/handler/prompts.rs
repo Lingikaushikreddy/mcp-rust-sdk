@@ -18,6 +18,10 @@ use crate::types::error::PromptError;
 ///
 /// Implementations provide the prompt metadata and the logic to generate
 /// prompt messages given a set of arguments.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to its generated Future-returning methods"
+)]
 #[async_trait]
 pub trait PromptHandler: Send + Sync + 'static {
     /// Returns metadata about this prompt (name, description, arguments).

@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use mcp_sdk::context::ToolContext;
 use mcp_sdk::handler::tools::ToolHandler;
-use mcp_sdk::protocol::messages::ToolInfo;
+use mcp_sdk::protocol::messages::{ToolAnnotations, ToolInfo};
 use mcp_sdk::schema::JsonSchemaBuilder;
 use mcp_sdk::server::McpServer;
 use mcp_sdk::transport::stdio::StdioTransport;
@@ -37,6 +37,13 @@ impl ToolHandler for AddTool {
                 .required("a")
                 .required("b")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -80,6 +87,13 @@ impl ToolHandler for SubtractTool {
                 .required("a")
                 .required("b")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -120,6 +134,13 @@ impl ToolHandler for MultiplyTool {
                 .required("a")
                 .required("b")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 
@@ -163,6 +184,13 @@ impl ToolHandler for DivideTool {
                 .required("a")
                 .required("b")
                 .build(),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
         }
     }
 

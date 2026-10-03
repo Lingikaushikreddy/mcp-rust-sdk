@@ -18,6 +18,10 @@ use crate::types::error::ResourceError;
 ///
 /// Implementations provide metadata about the resource and the logic
 /// to read its content when requested.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to its generated Future-returning methods"
+)]
 #[async_trait]
 pub trait ResourceHandler: Send + Sync + 'static {
     /// Returns metadata about this resource.
@@ -234,8 +238,11 @@ mod tests {
         let registry = ResourceRegistry::new();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
-        assert!(registry.list().is_empty());
-        assert!(registry.list_templates().is_empty());
+        assert_eq!(registry.list(), Vec::<ResourceInfo>::new());
+        assert_eq!(
+            registry.list_templates(),
+            Vec::<ResourceTemplateInfo>::new()
+        );
     }
 
     struct StaticResource;

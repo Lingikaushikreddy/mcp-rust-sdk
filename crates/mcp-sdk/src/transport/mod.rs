@@ -21,6 +21,10 @@ use crate::types::error::TransportError;
 ///
 /// Implementations handle the serialization and I/O of JSON-RPC messages
 /// over a specific transport mechanism (stdio, HTTP, etc.).
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to its generated Future-returning methods"
+)]
 #[async_trait]
 pub trait McpTransport: Send + Sync + 'static {
     /// Receives the next JSON-RPC message from the client.

@@ -37,6 +37,13 @@ use crate::types::error::ToolError;
 /// impl ToolHandler for EchoTool {
 ///     fn info(&self) -> ToolInfo {
 ///         ToolInfo {
+///             annotations: Some(mcp_sdk::ToolAnnotations {
+///                 read_only_hint: Some(true),
+///                 destructive_hint: Some(false),
+///                 idempotent_hint: Some(true),
+///                 open_world_hint: Some(false),
+///                 ..Default::default()
+///             }),
 ///             name: "echo".to_string(),
 ///             description: Some("Echo back the input".to_string()),
 ///             input_schema: serde_json::json!({
@@ -61,6 +68,10 @@ use crate::types::error::ToolError;
 ///     }
 /// }
 /// ```
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to its generated Future-returning methods"
+)]
 #[async_trait]
 pub trait ToolHandler: Send + Sync + 'static {
     /// Returns the metadata for this tool.
@@ -249,6 +260,13 @@ mod tests {
     impl ToolHandler for AddTool {
         fn info(&self) -> ToolInfo {
             ToolInfo {
+                annotations: Some(crate::ToolAnnotations {
+                    read_only_hint: Some(true),
+                    destructive_hint: Some(false),
+                    idempotent_hint: Some(true),
+                    open_world_hint: Some(false),
+                    ..Default::default()
+                }),
                 name: "add".to_string(),
                 description: Some("Add two numbers".to_string()),
                 input_schema: serde_json::json!({

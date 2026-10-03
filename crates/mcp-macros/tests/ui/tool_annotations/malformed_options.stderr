@@ -1,0 +1,23 @@
+error: expected a value for `read_only_hint` using `read_only_hint = ...`
+ --> tests/ui/tool_annotations/malformed_options.rs:7:12
+  |
+7 | #[mcp_tool(read_only_hint)]
+  |            ^^^^^^^^^^^^^^
+
+error: `destructive` is a bare flag; use `destructive_hint = true` or `destructive_hint = false`
+  --> tests/ui/tool_annotations/malformed_options.rs:12:12
+   |
+12 | #[mcp_tool(destructive = true)]
+   |            ^^^^^^^^^^^
+
+error: expected a string literal for `title`
+  --> tests/ui/tool_annotations/malformed_options.rs:17:20
+   |
+17 | #[mcp_tool(title = false)]
+   |                    ^^^^^
+
+error: expected `,`
+  --> tests/ui/tool_annotations/malformed_options.rs:22:27
+   |
+22 | #[mcp_tool(name = "first" description = "missing comma")]
+   |                           ^^^^^^^^^^^

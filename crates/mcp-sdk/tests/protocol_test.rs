@@ -60,6 +60,7 @@ fn test_initialize_result_serialization() {
 fn test_tools_list_result() {
     let result = ListToolsResult {
         tools: vec![ToolInfo {
+            annotations: None,
             name: "add".to_string(),
             description: Some("Add numbers".to_string()),
             input_schema: serde_json::json!({

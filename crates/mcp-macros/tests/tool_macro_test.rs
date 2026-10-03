@@ -23,6 +23,101 @@ async fn no_params() -> Result<CallToolResult, ToolError> {
     Ok(CallToolResult::text("hello"))
 }
 
+#[mcp_tool(destructive)]
+async fn delete_item() -> Result<CallToolResult, ToolError> {
+    Ok(CallToolResult::text("deleted"))
+}
+
+#[mcp_tool(
+    title = "Read, \"inspect\" and summarize",
+    read_only_hint = true,
+    destructive_hint = false,
+    idempotent_hint = true,
+    open_world_hint = false
+)]
+async fn inspect_item() -> Result<CallToolResult, ToolError> {
+    Ok(CallToolResult::text("inspected"))
+}
+
+#[mcp_tool(
+    read_only_hint = false,
+    destructive_hint = true,
+    idempotent_hint = false,
+    open_world_hint = true
+)]
+async fn update_item() -> Result<CallToolResult, ToolError> {
+    Ok(CallToolResult::text("updated"))
+}
+
+#[mcp_tool(read_only_hint = false)]
+async fn partially_annotated() -> Result<CallToolResult, ToolError> {
+    Ok(CallToolResult::text("partial"))
+}
+
+#[mcp_tool(title = "Display title")]
+async fn titled_item() -> Result<CallToolResult, ToolError> {
+    Ok(CallToolResult::text("titled"))
+}
+
+#[test]
+fn explicit_annotation_booleans_are_preserved_in_tool_info() {
+    let wire_info = serde_json::to_value(inspect_item().info()).unwrap();
+    assert_eq!(
+        wire_info["annotations"],
+        serde_json::json!({
+            "title": "Read, \"inspect\" and summarize",
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+        })
+    );
+
+    let wire_info = serde_json::to_value(update_item().info()).unwrap();
+    assert_eq!(
+        wire_info["annotations"],
+        serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+        })
+    );
+}
+
+#[test]
+fn unspecified_annotation_hints_are_omitted() {
+    let wire_info = serde_json::to_value(partially_annotated().info()).unwrap();
+    assert_eq!(
+        wire_info["annotations"],
+        serde_json::json!({ "readOnlyHint": false })
+    );
+}
+
+#[test]
+fn annotation_title_can_be_supplied_without_hints() {
+    let wire_info = serde_json::to_value(titled_item().info()).unwrap();
+    assert_eq!(
+        wire_info["annotations"],
+        serde_json::json!({ "title": "Display title" })
+    );
+}
+
+#[test]
+fn legacy_destructive_flag_is_advertised_in_tool_info() {
+    let wire_info = serde_json::to_value(delete_item().info()).unwrap();
+    assert_eq!(
+        wire_info["annotations"],
+        serde_json::json!({ "destructiveHint": true })
+    );
+}
+
+#[test]
+fn tool_without_annotation_options_omits_annotations() {
+    let wire_info = serde_json::to_value(no_params().info()).unwrap();
+    assert!(wire_info.get("annotations").is_none());
+}
+
 #[test]
 fn test_tool_info_add() {
     let handler = add();

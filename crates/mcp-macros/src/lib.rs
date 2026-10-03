@@ -29,14 +29,31 @@ use proc_macro::TokenStream;
 ///
 /// - `name = "..."` -- Override the tool name (defaults to the function name).
 /// - `description = "..."` -- Tool description (defaults to doc comment).
-/// - `destructive` -- Mark the tool as having side effects.
+/// - `title = "..."` -- Human-readable title in tool annotations.
+/// - `read_only_hint = true/false` -- Whether the tool does not modify its environment.
+/// - `destructive_hint = true/false` -- Whether the tool may perform destructive updates.
+/// - `idempotent_hint = true/false` -- Whether repeated calls with the same arguments
+///   have no additional effect.
+/// - `open_world_hint = true/false` -- Whether the tool may interact with external entities.
+/// - `destructive` -- Legacy shorthand for `destructive_hint = true`.
+///
+/// Omitted hints remain unspecified. Tools with no annotation attributes omit
+/// annotations entirely. Annotation hints describe tool behavior and do not
+/// enforce permissions. Unknown options, duplicates (including the legacy alias),
+/// and values of the wrong type are rejected at compile time.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// use mcp_sdk::prelude::*;
 ///
-/// #[mcp_tool(description = "Add two numbers")]
+/// #[mcp_tool(
+///     description = "Add two numbers",
+///     read_only_hint = true,
+///     destructive_hint = false,
+///     idempotent_hint = true,
+///     open_world_hint = false,
+/// )]
 /// async fn add(a: f64, b: f64) -> Result<CallToolResult, ToolError> {
 ///     Ok(CallToolResult::text((a + b).to_string()))
 /// }

@@ -16,6 +16,13 @@ struct EchoTool;
 impl ToolHandler for EchoTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
+            annotations: Some(mcp_sdk::ToolAnnotations {
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+                ..Default::default()
+            }),
             name: "echo".to_string(),
             description: Some("Echo the input message".to_string()),
             input_schema: JsonSchemaBuilder::new()
