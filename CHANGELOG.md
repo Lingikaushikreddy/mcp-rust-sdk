@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clients that relied on tool failures arriving as JSON-RPC errors must read `result.isError` instead.
 - HTTP servers reached through a public host name must add it with `allowed_hosts`; HTTP clients must send the `Mcp-Session-Id` returned by `initialize` (or the server must use `enable_sessions(false)`).
 - Custom `McpTransport` implementations must make `recv` cancel-safe.
+- Requests sent without waiting for earlier responses can now complete in any order. Clients whose calls depend on earlier results must wait for those responses first, as the example tests now do.
 
 ## [0.1.0] - 2026-03-13
 

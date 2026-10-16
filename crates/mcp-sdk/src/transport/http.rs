@@ -462,7 +462,7 @@ async fn resolve_session(
     state: &HttpState,
     headers: &HeaderMap,
     message: &JsonRpcMessage,
-) -> Result<(Option<String>, bool), Response> {
+) -> Result<(Option<String>, bool), Box<Response>> {
     if !state.config.enable_sessions {
         return Ok((None, false));
     }
@@ -474,10 +474,10 @@ async fn resolve_session(
                 session.last_active = Instant::now();
                 Ok((Some(sid.to_string()), false))
             }
-            None => Err(error_reply(
+            None => Err(Box::new(error_reply(
                 StatusCode::NOT_FOUND,
                 JsonRpcError::invalid_request(Some("Unknown session".to_string())),
-            )),
+            ))),
         };
     }
     if message.method() == Some("initialize") {
@@ -493,10 +493,10 @@ async fn resolve_session(
         info!(session_id = %sid, "Created new session");
         return Ok((Some(sid), true));
     }
-    Err(error_reply(
+    Err(Box::new(error_reply(
         StatusCode::BAD_REQUEST,
         JsonRpcError::invalid_request(Some("Missing Mcp-Session-Id header".to_string())),
-    ))
+    )))
 }
 
 /// Handles POST requests to the MCP endpoint.
@@ -536,7 +536,7 @@ async fn handle_post(
 
     let (session, created) = match resolve_session(&state, &headers, &message).await {
         Ok(resolved) => resolved,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let mut response = match message {
