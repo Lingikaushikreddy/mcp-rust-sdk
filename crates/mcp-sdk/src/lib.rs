@@ -1,9 +1,10 @@
-//! # mcp-sdk -- A high-performance Rust SDK for building MCP servers
+//! # mcp-sdk -- A Rust SDK for building MCP servers
 //!
-//! `mcp-sdk` provides a complete, ergonomic, and high-performance SDK for
-//! building [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
-//! servers in Rust. It brings the developer experience of modern Rust web
-//! frameworks to the MCP ecosystem through a macro-based API.
+//! `mcp-sdk` is a server-side SDK for the
+//! [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), revision
+//! 2025-11-25: a builder, handler traits and proc macros for tools, resources
+//! and prompts, over stdio or Streamable HTTP. `docs/CONFORMANCE.md` in the
+//! repository records which parts of the specification it implements.
 //!
 //! ## Quick Start
 //!

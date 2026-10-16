@@ -9,11 +9,11 @@
 //! for JSON-RPC protocol messages.
 
 use async_trait::async_trait;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex;
 use tracing::{debug, trace};
 
-use crate::protocol::types::{parse_jsonrpc_message, JsonRpcMessage};
+use crate::protocol::types::{decode_jsonrpc_message, JsonRpcMessage};
 use crate::transport::McpTransport;
 use crate::types::error::TransportError;
 
@@ -36,7 +36,39 @@ use crate::types::error::TransportError;
 /// ```
 pub struct StdioTransport {
     reader: Mutex<BufReader<io::Stdin>>,
+    line: Vec<u8>,
     writer: Mutex<BufWriter<io::Stdout>>,
+}
+
+/// Reads the next newline-delimited JSON-RPC message.
+///
+/// Cancel-safe: bytes of a partially read line stay in `line`, so a call
+/// dropped mid-read (for example by `tokio::select!` in the server loop)
+/// resumes where it left off on the next call.
+async fn read_message<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+) -> Result<Option<JsonRpcMessage>, TransportError> {
+    loop {
+        let bytes_read = reader
+            .read_until(b'\n', line)
+            .await
+            .map_err(TransportError::Io)?;
+        if bytes_read == 0 && line.is_empty() {
+            debug!("stdin EOF reached, transport closing");
+            return Ok(None);
+        }
+        let raw = std::mem::take(line);
+        let text = String::from_utf8(raw)
+            .map_err(|e| TransportError::Deserialization(format!("Invalid UTF-8: {e}")))?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            trace!("Skipping empty line");
+            continue;
+        }
+        trace!(message_len = trimmed.len(), "Received message");
+        return decode_jsonrpc_message(trimmed).map(Some);
+    }
 }
 
 impl StdioTransport {
@@ -45,6 +77,7 @@ impl StdioTransport {
     pub fn new() -> Self {
         Self {
             reader: Mutex::new(BufReader::new(io::stdin())),
+            line: Vec::new(),
             writer: Mutex::new(BufWriter::new(io::stdout())),
         }
     }
@@ -65,35 +98,8 @@ impl std::fmt::Debug for StdioTransport {
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn recv(&mut self) -> Result<Option<JsonRpcMessage>, TransportError> {
-        loop {
-            let mut line = String::new();
-            let bytes_read = {
-                let mut reader = self.reader.lock().await;
-                reader
-                    .read_line(&mut line)
-                    .await
-                    .map_err(TransportError::Io)?
-            };
-
-            if bytes_read == 0 {
-                debug!("stdin EOF reached, transport closing");
-                return Ok(None);
-            }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                trace!("Skipping empty line from stdin");
-                continue;
-            }
-
-            trace!(message_len = trimmed.len(), "Received message from stdin");
-
-            let message = parse_jsonrpc_message(trimmed).map_err(|e| {
-                TransportError::Deserialization(format!("Failed to parse JSON-RPC message: {e}"))
-            })?;
-
-            return Ok(Some(message));
-        }
+        let mut reader = self.reader.lock().await;
+        read_message(&mut *reader, &mut self.line).await
     }
 
     async fn send(&self, message: &JsonRpcMessage) -> Result<(), TransportError> {
@@ -129,6 +135,7 @@ impl McpTransport for StdioTransport {
 /// actual process I/O.
 pub struct TestStdioTransport {
     reader: Mutex<io::BufReader<std::io::Cursor<Vec<u8>>>>,
+    line: Vec<u8>,
     /// The output buffer. Access via `output()` after the server finishes.
     output: std::sync::Arc<Mutex<Vec<u8>>>,
 }
@@ -141,6 +148,7 @@ impl TestStdioTransport {
     pub fn new(input: Vec<u8>) -> Self {
         Self {
             reader: Mutex::new(io::BufReader::new(std::io::Cursor::new(input))),
+            line: Vec::new(),
             output: std::sync::Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -165,31 +173,8 @@ impl std::fmt::Debug for TestStdioTransport {
 #[async_trait]
 impl McpTransport for TestStdioTransport {
     async fn recv(&mut self) -> Result<Option<JsonRpcMessage>, TransportError> {
-        loop {
-            let mut line = String::new();
-            let bytes_read = {
-                let mut reader = self.reader.lock().await;
-                reader
-                    .read_line(&mut line)
-                    .await
-                    .map_err(TransportError::Io)?
-            };
-
-            if bytes_read == 0 {
-                return Ok(None);
-            }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let message = parse_jsonrpc_message(trimmed).map_err(|e| {
-                TransportError::Deserialization(format!("Failed to parse JSON-RPC message: {e}"))
-            })?;
-
-            return Ok(Some(message));
-        }
+        let mut reader = self.reader.lock().await;
+        read_message(&mut *reader, &mut self.line).await
     }
 
     async fn send(&self, message: &JsonRpcMessage) -> Result<(), TransportError> {

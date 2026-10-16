@@ -30,6 +30,13 @@ pub trait McpTransport: Send + Sync + 'static {
     /// Receives the next JSON-RPC message from the client.
     ///
     /// Returns `Ok(None)` when the transport is cleanly closed (e.g., EOF on stdin).
+    /// Invalid JSON is reported as [`TransportError::Deserialization`] and
+    /// JSON that is not a JSON-RPC message as [`TransportError::InvalidMessage`];
+    /// the server answers both and keeps reading.
+    ///
+    /// Must be cancel-safe: the server polls `recv` inside `tokio::select!`
+    /// alongside in-flight requests, so a call may be dropped before it
+    /// completes and must not lose a partially received message.
     async fn recv(&mut self) -> Result<Option<JsonRpcMessage>, TransportError>;
 
     /// Sends a JSON-RPC message to the client.

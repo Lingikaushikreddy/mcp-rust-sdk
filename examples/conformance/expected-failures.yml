@@ -1,0 +1,14 @@
+# Official MCP conformance scenarios (2025-11-25 requirements) that fail
+# because this SDK does not implement the feature. See docs/CONFORMANCE.md.
+# CI fails if any other scenario fails, or if one of these starts passing.
+server:
+  - completion-complete
+  - tools-call-audio
+  - tools-call-with-logging
+  - tools-call-with-progress
+  - tools-call-sampling
+  - tools-call-elicitation
+  - elicitation-sep1034-defaults
+  - elicitation-sep1330-enums
+  - resources-subscribe
+  - resources-unsubscribe

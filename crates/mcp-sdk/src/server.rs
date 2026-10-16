@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -43,7 +44,7 @@ use crate::handler::prompts::{PromptHandler, PromptRegistry};
 use crate::handler::resources::{ResourceHandler, ResourceRegistry};
 use crate::handler::tools::{ToolHandler, ToolRegistry};
 use crate::protocol::capabilities::{
-    ServerCapabilities, ServerCapabilitiesBuilder, PROTOCOL_VERSION,
+    ServerCapabilities, ServerCapabilitiesBuilder, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use crate::protocol::messages::{
     methods, CallToolParams, GetPromptParams, GetPromptResult, Implementation, InitializeParams,
@@ -52,10 +53,8 @@ use crate::protocol::messages::{
 };
 use crate::protocol::types::{JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, RequestId};
 use crate::transport::McpTransport;
-use crate::types::error::{JsonRpcError, McpError};
-
-/// Supported protocol versions.
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2024-11-05"];
+use crate::types::content::{CallToolResult, Content};
+use crate::types::error::{JsonRpcError, McpError, TransportError};
 
 /// Builder for constructing an [`McpServer`].
 ///
@@ -304,89 +303,71 @@ impl McpServer {
             "MCP server starting"
         );
 
+        // Tool calls, resource reads and prompt gets run as tasks so the loop
+        // keeps reading: pings and `notifications/cancelled` must be handled
+        // while they are in flight. Each task yields `None` when its request
+        // was cancelled, because a cancelled request gets no response.
+        let mut in_flight: JoinSet<Option<JsonRpcMessage>> = JoinSet::new();
+
         loop {
-            let message = match transport.recv().await {
+            let incoming = tokio::select! {
+                Some(done) = in_flight.join_next(), if !in_flight.is_empty() => {
+                    send_completed(&transport, done).await?;
+                    continue;
+                }
+                incoming = transport.recv() => incoming,
+            };
+
+            let message = match incoming {
                 Ok(Some(msg)) => msg,
                 Ok(None) => {
                     info!("Transport closed, shutting down");
                     break;
                 }
+                Err(TransportError::Deserialization(detail)) => {
+                    warn!(error = %detail, "Received invalid JSON");
+                    let response = JsonRpcMessage::error_response_without_id(
+                        JsonRpcError::parse_error(Some(detail)),
+                    );
+                    transport
+                        .send(&response)
+                        .await
+                        .map_err(McpError::Transport)?;
+                    continue;
+                }
+                Err(TransportError::InvalidMessage(detail)) => {
+                    warn!(error = %detail, "Received an invalid JSON-RPC message");
+                    let response = JsonRpcMessage::error_response_without_id(
+                        JsonRpcError::invalid_request(Some(detail)),
+                    );
+                    transport
+                        .send(&response)
+                        .await
+                        .map_err(McpError::Transport)?;
+                    continue;
+                }
                 Err(e) => {
-                    // For deserialization errors, send a parse error response
-                    // and continue. For I/O errors, shut down.
-                    if let crate::types::error::TransportError::Deserialization(detail) = &e {
-                        warn!(error = %detail, "Failed to parse incoming message");
-                        let error_response = JsonRpcMessage::error_response(
-                            RequestId::Number(0),
-                            JsonRpcError::parse_error(Some(detail.clone())),
-                        );
-                        if let Err(send_err) = transport.send(&error_response).await {
-                            error!(error = %send_err, "Failed to send parse error response");
-                        }
-                        continue;
-                    }
                     error!(error = %e, "Fatal transport error");
                     return Err(McpError::Transport(e));
                 }
             };
 
             match message {
-                JsonRpcMessage::Request(request) => {
-                    let state = Arc::clone(&self.state);
-                    let method = request.method.clone();
-
-                    // For async operations (tool calls, resource reads, prompt gets),
-                    // dispatch concurrently. For synchronous operations, handle inline
-                    // to avoid unnecessary task spawning overhead.
-                    match method.as_str() {
-                        methods::TOOLS_CALL | methods::RESOURCES_READ | methods::PROMPTS_GET => {
-                            // Register cancellation token for this request
-                            let request_id_str = request.id.to_string();
-                            let cancel_token = state.register_cancellation(&request_id_str).await;
-
-                            let response = {
-                                let state = Arc::clone(&state);
-                                tokio::spawn(async move {
-                                    let result =
-                                        handle_async_request(&state, request, cancel_token).await;
-                                    state.unregister_cancellation(&request_id_str).await;
-                                    result
-                                })
-                            };
-
-                            // Wait for the spawned task and send response
-                            match response.await {
-                                Ok(resp) => {
-                                    if let Err(e) = transport.send(&resp).await {
-                                        error!(error = %e, "Failed to send response");
-                                        return Err(McpError::Transport(e));
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(error = %e, "Spawned task panicked");
-                                    let error_resp = JsonRpcMessage::error_response(
-                                        RequestId::Number(0),
-                                        JsonRpcError::internal_error(Some(
-                                            "Internal task error".to_string(),
-                                        )),
-                                    );
-                                    if let Err(e) = transport.send(&error_resp).await {
-                                        error!(error = %e, "Failed to send error response");
-                                        return Err(McpError::Transport(e));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            // Handle synchronous requests inline
-                            let response = handle_sync_request(&state, &request);
-                            if let Err(e) = transport.send(&response).await {
-                                error!(error = %e, "Failed to send response");
-                                return Err(McpError::Transport(e));
-                            }
-                        }
+                JsonRpcMessage::Request(request) => match request.method.as_str() {
+                    methods::TOOLS_CALL | methods::RESOURCES_READ | methods::PROMPTS_GET => {
+                        let request_id = request.id.to_string();
+                        let cancel_token = self.state.register_cancellation(&request_id).await;
+                        let state = Arc::clone(&self.state);
+                        in_flight.spawn(run_async_request(state, request, cancel_token));
                     }
-                }
+                    _ => {
+                        let response = handle_sync_request(&self.state, &request);
+                        transport.send(&response).await.map_err(|e| {
+                            error!(error = %e, "Failed to send response");
+                            McpError::Transport(e)
+                        })?;
+                    }
+                },
                 JsonRpcMessage::Notification(notification) => {
                     handle_notification(&self.state, &notification).await;
                 }
@@ -397,10 +378,71 @@ impl McpServer {
             }
         }
 
+        // The client closed its side; finish the requests it already sent.
+        while let Some(done) = in_flight.join_next().await {
+            send_completed(&transport, done).await?;
+        }
+
         transport.close().await.map_err(McpError::Transport)?;
         info!("MCP server shut down gracefully");
         Ok(())
     }
+}
+
+/// Sends the response of a finished in-flight request, if it has one.
+async fn send_completed(
+    transport: &impl McpTransport,
+    done: Result<Option<JsonRpcMessage>, tokio::task::JoinError>,
+) -> Result<(), McpError> {
+    let response = match done {
+        Ok(Some(response)) => response,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            // `run_async_request` converts handler panics into responses, so
+            // only a runtime shutdown lands here.
+            error!(error = %e, "In-flight request task failed");
+            return Ok(());
+        }
+    };
+    transport.send(&response).await.map_err(|e| {
+        error!(error = %e, "Failed to send response");
+        McpError::Transport(e)
+    })
+}
+
+/// Runs one tool call, resource read or prompt get to completion.
+///
+/// Returns `None` when the request is cancelled. A panicking handler is
+/// answered with an internal error carrying the request's own id.
+async fn run_async_request(
+    state: Arc<ServerState>,
+    request: JsonRpcRequest,
+    cancel_token: CancellationToken,
+) -> Option<JsonRpcMessage> {
+    let id = request.id.clone();
+    let request_id = id.to_string();
+    let handler = {
+        let state = Arc::clone(&state);
+        let token = cancel_token.clone();
+        tokio::spawn(async move { handle_async_request(&state, request, token).await })
+    };
+    let abort = handler.abort_handle();
+    let response = tokio::select! {
+        joined = handler => Some(joined.unwrap_or_else(|e| {
+            error!(id = %id, error = %e, "Request handler panicked");
+            JsonRpcMessage::error_response(
+                id.clone(),
+                JsonRpcError::internal_error(Some("Internal task error".to_string())),
+            )
+        })),
+        () = cancel_token.cancelled() => {
+            abort.abort();
+            info!(id = %id, "Request cancelled; not sending a response");
+            None
+        }
+    };
+    state.unregister_cancellation(&request_id).await;
+    response
 }
 
 /// Handles synchronous requests (initialize, ping, list operations).
@@ -409,8 +451,12 @@ fn handle_sync_request(state: &ServerState, request: &JsonRpcRequest) -> JsonRpc
 
     debug!(method = %request.method, id = %id, "Handling sync request");
 
-    // Before initialization, only `initialize` is allowed
-    if !state.initialized.load(Ordering::Acquire) && request.method != methods::INITIALIZE {
+    // Before initialization, only `initialize` and `ping` are allowed
+    // (2025-11-25 basic/lifecycle.mdx: clients may ping before initializing).
+    if !state.initialized.load(Ordering::Acquire)
+        && request.method != methods::INITIALIZE
+        && request.method != methods::PING
+    {
         return JsonRpcMessage::error_response(
             id,
             JsonRpcError::invalid_request(Some(
@@ -620,34 +666,32 @@ async fn handle_tools_call(
         }
     };
 
-    let context = ToolContext::with_cancellation(id.to_string(), cancel_token.clone());
+    if state.tool_registry.get(&call_params.name).is_none() {
+        warn!(tool_name = %call_params.name, "Unknown tool requested");
+        return JsonRpcMessage::error_response(
+            id.clone(),
+            JsonRpcError::invalid_params(Some(format!("Unknown tool: {}", call_params.name))),
+        );
+    }
 
-    // Race the tool call against cancellation
-    tokio::select! {
-        result = state.tool_registry.call(&call_params.name, call_params.arguments, &context) => {
-            match result {
-                Ok(result) => match serde_json::to_value(&result) {
-                    Ok(value) => JsonRpcMessage::response(id.clone(), value),
-                    Err(e) => JsonRpcMessage::error_response(
-                        id.clone(),
-                        JsonRpcError::internal_error(Some(format!(
-                            "Failed to serialize tool result: {e}"
-                        ))),
-                    ),
-                },
-                Err(e) => JsonRpcMessage::error_response(
-                    id.clone(),
-                    JsonRpcError::new(e.error_code(), Some(e.to_string())),
-                ),
-            }
-        }
-        () = cancel_token.cancelled() => {
-            warn!(id = %id, "Tool call cancelled");
-            JsonRpcMessage::error_response(
-                id.clone(),
-                JsonRpcError::internal_error(Some("Request cancelled".to_string())),
-            )
-        }
+    let context = ToolContext::with_cancellation(id.to_string(), cancel_token);
+    let result = state
+        .tool_registry
+        .call(&call_params.name, call_params.arguments, &context)
+        .await
+        // Errors raised by the tool itself (bad arguments, failed API calls,
+        // business logic) are tool execution errors: the model sees them as a
+        // result with `isError: true` (2025-11-25 server/tools.mdx).
+        .unwrap_or_else(|e| CallToolResult {
+            content: vec![Content::text(e.message())],
+            is_error: true,
+        });
+    match serde_json::to_value(&result) {
+        Ok(value) => JsonRpcMessage::response(id.clone(), value),
+        Err(e) => JsonRpcMessage::error_response(
+            id.clone(),
+            JsonRpcError::internal_error(Some(format!("Failed to serialize tool result: {e}"))),
+        ),
     }
 }
 

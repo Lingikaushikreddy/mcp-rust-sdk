@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 /// The current MCP protocol version supported by this SDK.
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
+/// Every protocol version this SDK negotiates, newest first.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[PROTOCOL_VERSION, "2024-11-05"];
+
 /// Capabilities declared by the MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ServerCapabilities {

@@ -77,6 +77,18 @@ impl ToolError {
             }
         }
     }
+
+    /// Returns the error message without the variant prefix, as reported to
+    /// the client in a `CallToolResult` with `isError: true`.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::InvalidParams(m)
+            | Self::ExecutionError(m)
+            | Self::Internal(m)
+            | Self::Other(m) => m,
+        }
+    }
 }
 
 /// Error returned by resource handler functions.
@@ -148,9 +160,14 @@ pub enum TransportError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// Failed to deserialize a message.
+    /// The incoming bytes were not valid JSON (JSON-RPC -32700 Parse error).
     #[error("Deserialization error: {0}")]
     Deserialization(String),
+
+    /// The incoming JSON was not a valid JSON-RPC 2.0 message
+    /// (JSON-RPC -32600 Invalid Request).
+    #[error("Invalid JSON-RPC message: {0}")]
+    InvalidMessage(String),
 
     /// The transport connection was closed.
     #[error("Connection closed")]

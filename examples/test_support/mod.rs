@@ -1,12 +1,19 @@
 //! Shared subprocess helpers for exercising the example servers over stdio.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+/// Runs an example server as a subprocess and returns every message it wrote.
+///
+/// Requests are sent one at a time: each waits for its response before the
+/// next is written, the way a client sends calls that depend on earlier
+/// results. The server handles requests concurrently, so pipelined requests
+/// may complete in any order.
 pub fn run_example(binary: &str, args: &[&str], requests: Vec<Value>) -> Vec<Value> {
     let mut child = Command::new(binary)
         .args(args)
@@ -16,12 +23,17 @@ pub fn run_example(binary: &str, args: &[&str], requests: Vec<Value>) -> Vec<Val
         .spawn()
         .expect("start example server");
     // Drain both pipes concurrently so a verbose server cannot block on output.
-    let mut stdout = child.stdout.take().expect("piped stdout");
+    let stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
+    let (line_tx, line_rx) = mpsc::channel::<Value>();
     let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).expect("read stdout");
-        bytes
+        for line in BufReader::new(stdout).lines() {
+            let line = line.expect("read stdout");
+            let message: Value = serde_json::from_str(&line).expect("JSON-RPC response");
+            if line_tx.send(message).is_err() {
+                break;
+            }
+        }
     });
     let stderr_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -29,6 +41,8 @@ pub fn run_example(binary: &str, args: &[&str], requests: Vec<Value>) -> Vec<Val
         bytes
     });
     let mut input = child.stdin.take().expect("piped stdin");
+    let mut replies = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
     for message in [
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-11-25", "capabilities": {},
@@ -41,9 +55,23 @@ pub fn run_example(binary: &str, args: &[&str], requests: Vec<Value>) -> Vec<Val
     .chain(requests)
     {
         writeln!(input, "{message}").expect("send JSON-RPC message");
+        input.flush().expect("flush stdin");
+        let Some(id) = message.get("id") else {
+            continue;
+        };
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let reply = line_rx
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("no response to request {id} within 30 seconds"));
+            let done = reply.get("id") == Some(id);
+            replies.push(reply);
+            if done {
+                break;
+            }
+        }
     }
     drop(input);
-    let deadline = Instant::now() + Duration::from_secs(30);
     let (status, timed_out) = loop {
         if let Some(status) = child.try_wait().expect("check example process") {
             break (status, false);
@@ -54,7 +82,8 @@ pub fn run_example(binary: &str, args: &[&str], requests: Vec<Value>) -> Vec<Val
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    let stdout = stdout_reader.join().expect("stdout reader");
+    stdout_reader.join().expect("stdout reader");
+    replies.extend(line_rx.try_iter());
     let stderr = stderr_reader.join().expect("stderr reader");
     assert!(
         !timed_out,
@@ -66,11 +95,7 @@ pub fn run_example(binary: &str, args: &[&str], requests: Vec<Value>) -> Vec<Val
         "example failed: {}",
         String::from_utf8_lossy(&stderr)
     );
-    String::from_utf8(stdout)
-        .expect("UTF-8 output")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("JSON-RPC response"))
-        .collect()
+    replies
 }
 
 pub fn response(responses: &[Value], id: u64) -> &Value {

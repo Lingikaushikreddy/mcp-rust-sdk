@@ -1,37 +1,52 @@
 //! Streamable HTTP transport for MCP.
 //!
-//! This transport exposes the MCP server over HTTP using the Streamable HTTP
-//! specification. It uses Axum as the HTTP framework and supports POST
-//! for receiving requests, GET for SSE notification streams, and DELETE
-//! for session termination.
+//! This transport exposes the MCP server over HTTP following the Streamable
+//! HTTP transport of the MCP 2025-11-25 specification. It uses Axum as the
+//! HTTP framework:
 //!
-//! The HTTP POST handler uses oneshot channels to correlate JSON-RPC
-//! requests with their responses. When a POST arrives with a request
-//! (containing an `id`), it sends the message to the server and waits
-//! for the response on a oneshot channel keyed by the request ID.
+//! - `POST` carries one JSON-RPC message. Requests are answered with a single
+//!   `application/json` response; notifications and responses get
+//!   `202 Accepted` with no body.
+//! - `GET` returns `405 Method Not Allowed`: this transport does not offer a
+//!   server-to-client SSE stream, which the specification permits.
+//! - `DELETE` terminates a session.
+//!
+//! Every request is checked against an allow-list of host names in its
+//! `Host` and `Origin` headers (DNS rebinding protection) and against the
+//! protocol versions this SDK supports (`MCP-Protocol-Version`).
+//!
+//! The server sees each HTTP request under a transport-assigned request id,
+//! so two sessions that both use id `1` cannot receive each other's
+//! responses; the client's own id is restored on the way out.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
-use axum::Json;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::protocol::types::JsonRpcMessage;
+use crate::protocol::capabilities::SUPPORTED_PROTOCOL_VERSIONS;
+use crate::protocol::types::{decode_jsonrpc_message, JsonRpcMessage, RequestId};
 use crate::transport::McpTransport;
-use crate::types::error::TransportError;
+use crate::types::error::{JsonRpcError, TransportError};
+
+const SESSION_HEADER: &str = "mcp-session-id";
+const PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration for the HTTP transport.
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
-    /// The address to bind the HTTP server to.
+    /// The address to bind the HTTP server to (default: `127.0.0.1:3000`).
     pub bind_addr: SocketAddr,
     /// The endpoint path for MCP messages (default: "/mcp").
     pub endpoint: String,
@@ -41,16 +56,26 @@ pub struct HttpConfig {
     pub session_timeout: Duration,
     /// Maximum number of concurrent sessions (default: 1000).
     pub max_sessions: usize,
+    /// Host names accepted in the `Host` and `Origin` headers, compared
+    /// case-insensitively and without the port (default: `localhost`,
+    /// `127.0.0.1` and `[::1]`). `None` disables the check.
+    pub allowed_hosts: Option<Vec<String>>,
 }
 
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            bind_addr: SocketAddr::from(([0, 0, 0, 0], 3000)),
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
             endpoint: "/mcp".to_string(),
             enable_sessions: true,
             session_timeout: Duration::from_secs(1800),
             max_sessions: 1000,
+            allowed_hosts: Some(
+                ["localhost", "127.0.0.1", "[::1]"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            ),
         }
     }
 }
@@ -77,7 +102,7 @@ impl HttpTransportBuilder {
         self
     }
 
-    /// Sets the bind address from a string like "0.0.0.0:3000".
+    /// Sets the bind address from a string like "127.0.0.1:3000".
     ///
     /// # Errors
     ///
@@ -117,6 +142,31 @@ impl HttpTransportBuilder {
         self
     }
 
+    /// Adds host names accepted in the `Host` and `Origin` headers, on top of
+    /// the local defaults. Use this for the public name of a server deployed
+    /// behind a reverse proxy.
+    #[must_use]
+    pub fn allowed_hosts<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config
+            .allowed_hosts
+            .get_or_insert_with(Vec::new)
+            .extend(hosts.into_iter().map(Into::into));
+        self
+    }
+
+    /// Disables `Host` and `Origin` validation. Only do this when another
+    /// layer (such as a reverse proxy) performs the check: the specification
+    /// requires servers to validate `Origin` to prevent DNS rebinding.
+    #[must_use]
+    pub fn allow_any_host(mut self) -> Self {
+        self.config.allowed_hosts = None;
+        self
+    }
+
     /// Builds the HTTP transport.
     #[must_use]
     pub fn build(self) -> HttpTransport {
@@ -141,29 +191,51 @@ pub struct SessionState {
     pub last_active: Instant,
 }
 
+/// A request forwarded to the server and still waiting for its response.
+#[derive(Debug)]
+struct PendingRequest {
+    /// The id the client used, restored on the response.
+    client_id: RequestId,
+    session: Option<String>,
+    respond: oneshot::Sender<JsonRpcMessage>,
+}
+
+/// Requests in flight, keyed by the transport-assigned id the server sees.
+#[derive(Debug, Default)]
+struct InFlight {
+    by_server_id: HashMap<String, PendingRequest>,
+    /// `(session, client id)` to server id, for `notifications/cancelled`.
+    by_client_id: HashMap<(Option<String>, String), String>,
+}
+
 /// Shared state for the HTTP transport.
 #[derive(Debug)]
 struct HttpState {
-    /// Active sessions.
     sessions: RwLock<HashMap<String, SessionState>>,
-    /// Channel for routing incoming messages to the server.
     incoming_tx: mpsc::Sender<JsonRpcMessage>,
-    /// Pending response channels keyed by request ID string.
-    pending_responses: Mutex<HashMap<String, oneshot::Sender<JsonRpcMessage>>>,
-    /// Config.
+    in_flight: Mutex<InFlight>,
+    next_id: AtomicU64,
     config: HttpConfig,
 }
 
 /// MCP transport over Streamable HTTP using Axum.
 ///
-/// Supports POST for requests, GET for SSE streams, and DELETE for
-/// session termination.
+/// Serve [`HttpTransport::router`] with Axum and pass the transport to
+/// [`McpServer::run`](crate::server::McpServer::run):
 ///
-/// The POST handler uses oneshot channels to correlate requests with
-/// responses. When a request arrives, a oneshot channel is created and
-/// stored by request ID. The server processes the request and sends the
-/// response back through the oneshot channel. The HTTP handler awaits
-/// the response and returns it to the HTTP client.
+/// ```rust,no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use mcp_sdk::server::McpServer;
+/// use mcp_sdk::transport::http::HttpTransport;
+///
+/// let transport = HttpTransport::new();
+/// let listener = tokio::net::TcpListener::bind(transport.bind_addr()).await?;
+/// let router = transport.router();
+/// tokio::spawn(async move { axum::serve(listener, router).await });
+/// McpServer::builder().build().run(transport).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct HttpTransport {
     config: HttpConfig,
     state: Arc<HttpState>,
@@ -184,7 +256,8 @@ impl HttpTransport {
         let state = Arc::new(HttpState {
             sessions: RwLock::new(HashMap::new()),
             incoming_tx,
-            pending_responses: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(InFlight::default()),
+            next_id: AtomicU64::new(1),
             config: config.clone(),
         });
         Self {
@@ -206,9 +279,10 @@ impl HttpTransport {
         let endpoint = self.config.endpoint.clone();
 
         axum::Router::new()
-            .route(&endpoint, post(handle_post))
-            .route(&endpoint, get(handle_get))
-            .route(&endpoint, delete(handle_delete))
+            .route(
+                &endpoint,
+                post(handle_post).get(handle_get).delete(handle_delete),
+            )
             .with_state(state)
     }
 
@@ -237,23 +311,31 @@ impl std::fmt::Debug for HttpTransport {
 impl McpTransport for HttpTransport {
     async fn recv(&mut self) -> Result<Option<JsonRpcMessage>, TransportError> {
         let mut rx = self.incoming_rx.lock().await;
-        match rx.recv().await {
-            Some(msg) => Ok(Some(msg)),
-            None => Ok(None),
-        }
+        Ok(rx.recv().await)
     }
 
     async fn send(&self, message: &JsonRpcMessage) -> Result<(), TransportError> {
-        // Route the response back to the pending HTTP request via oneshot channel
-        if let Some(id) = message.id() {
-            let id_str = id.to_string();
-            let mut pending = self.state.pending_responses.lock().await;
-            if let Some(sender) = pending.remove(&id_str) {
-                let _ = sender.send(message.clone());
-                return Ok(());
+        let Some(server_id) = message.id().map(ToString::to_string) else {
+            // Without a GET stream there is no channel for server-initiated
+            // notifications.
+            debug!("Dropping server notification: no SSE stream on this transport");
+            return Ok(());
+        };
+        let pending = {
+            let mut in_flight = self.state.in_flight.lock().await;
+            let pending = in_flight.by_server_id.remove(&server_id);
+            if let Some(p) = &pending {
+                in_flight
+                    .by_client_id
+                    .remove(&(p.session.clone(), p.client_id.to_string()));
             }
+            pending
+        };
+        if let Some(p) = pending {
+            let _ = p.respond.send(with_id(message.clone(), p.client_id));
+        } else {
+            debug!(id = %server_id, "No pending HTTP request for response");
         }
-        // If no pending request found (e.g., notification), that's ok
         Ok(())
     }
 
@@ -271,232 +353,350 @@ impl McpTransport for HttpTransport {
     }
 }
 
-/// Extracts the request ID string from a JSON value (for pending response lookup).
-fn extract_request_id(body: &serde_json::Value) -> Option<String> {
-    body.get("id").map(|id| match id {
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    })
+/// Returns `message` with its id replaced.
+fn with_id(message: JsonRpcMessage, id: RequestId) -> JsonRpcMessage {
+    match message {
+        JsonRpcMessage::Request(mut r) => {
+            r.id = id;
+            JsonRpcMessage::Request(r)
+        }
+        JsonRpcMessage::Response(mut r) => {
+            r.id = id;
+            JsonRpcMessage::Response(r)
+        }
+        JsonRpcMessage::ErrorResponse(mut r) => {
+            r.id = Some(id);
+            JsonRpcMessage::ErrorResponse(r)
+        }
+        JsonRpcMessage::Notification(n) => JsonRpcMessage::Notification(n),
+    }
+}
+
+/// An HTTP error whose body is a JSON-RPC error response without an id
+/// (2025-11-25 basic/transports.mdx).
+fn error_reply(status: StatusCode, error: JsonRpcError) -> Response {
+    json_reply(status, &JsonRpcMessage::error_response_without_id(error))
+}
+
+fn json_reply(status: StatusCode, message: &JsonRpcMessage) -> Response {
+    let body = serde_json::to_vec(message).unwrap_or_default();
+    (
+        status,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response()
+}
+
+fn accepted() -> Response {
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// Extracts the host name, without port, from a `Host` header value or the
+/// authority of an `Origin`.
+fn host_name(authority: &str) -> &str {
+    if authority.starts_with('[') {
+        authority
+            .find(']')
+            .map_or(authority, |end| &authority[..=end])
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    }
+}
+
+/// DNS rebinding protection: `Host` and, when present, `Origin` must name an
+/// allowed host. 2025-11-25 basic/transports.mdx: "Servers MUST validate the
+/// Origin header on all incoming connections".
+fn host_or_origin_rejection(config: &HttpConfig, headers: &HeaderMap) -> Option<Response> {
+    let allowed = config.allowed_hosts.as_ref()?;
+    let is_allowed = |name: &str| allowed.iter().any(|a| a.eq_ignore_ascii_case(name));
+    let forbidden = |what: &str, value: &str| {
+        warn!(%what, %value, "Rejected request from a host that is not allowed");
+        error_reply(
+            StatusCode::FORBIDDEN,
+            JsonRpcError::invalid_request(Some(format!("{what} not allowed: {value}"))),
+        )
+    };
+
+    if let Some(host) = headers.get(header::HOST) {
+        let host = host.to_str().unwrap_or_default();
+        if !is_allowed(host_name(host)) {
+            return Some(forbidden("Host", host));
+        }
+    }
+    if let Some(origin) = headers.get(header::ORIGIN) {
+        let origin = origin.to_str().unwrap_or_default();
+        let authority = origin
+            .split_once("://")
+            .map(|(_, rest)| rest.split('/').next().unwrap_or(rest));
+        if !authority.is_some_and(|a| is_allowed(host_name(a))) {
+            return Some(forbidden("Origin", origin));
+        }
+    }
+    None
+}
+
+/// 2025-11-25 basic/transports.mdx: an invalid or unsupported
+/// `MCP-Protocol-Version` gets 400. A missing header is accepted.
+fn protocol_version_rejection(headers: &HeaderMap) -> Option<Response> {
+    let version = headers.get(PROTOCOL_VERSION_HEADER)?;
+    let version = version.to_str().unwrap_or_default();
+    if SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
+        return None;
+    }
+    Some(error_reply(
+        StatusCode::BAD_REQUEST,
+        JsonRpcError::invalid_request(Some(format!(
+            "Unsupported MCP-Protocol-Version: {version} (supported: {})",
+            SUPPORTED_PROTOCOL_VERSIONS.join(", ")
+        ))),
+    ))
+}
+
+/// Resolves the session for a POST: an existing session, a new one for
+/// `initialize`, or an error response.
+async fn resolve_session(
+    state: &HttpState,
+    headers: &HeaderMap,
+    message: &JsonRpcMessage,
+) -> Result<(Option<String>, bool), Box<Response>> {
+    if !state.config.enable_sessions {
+        return Ok((None, false));
+    }
+    let header = headers.get(SESSION_HEADER).and_then(|v| v.to_str().ok());
+    if let Some(sid) = header {
+        let mut sessions = state.sessions.write().await;
+        return match sessions.get_mut(sid) {
+            Some(session) => {
+                session.last_active = Instant::now();
+                Ok((Some(sid.to_string()), false))
+            }
+            None => Err(Box::new(error_reply(
+                StatusCode::NOT_FOUND,
+                JsonRpcError::invalid_request(Some("Unknown session".to_string())),
+            ))),
+        };
+    }
+    if message.method() == Some("initialize") {
+        let sid = uuid::Uuid::new_v4().to_string();
+        state.sessions.write().await.insert(
+            sid.clone(),
+            SessionState {
+                id: sid.clone(),
+                created_at: Instant::now(),
+                last_active: Instant::now(),
+            },
+        );
+        info!(session_id = %sid, "Created new session");
+        return Ok((Some(sid), true));
+    }
+    Err(Box::new(error_reply(
+        StatusCode::BAD_REQUEST,
+        JsonRpcError::invalid_request(Some("Missing Mcp-Session-Id header".to_string())),
+    )))
 }
 
 /// Handles POST requests to the MCP endpoint.
-///
-/// For requests (messages with an `id`), this handler creates a oneshot
-/// channel, routes the message to the server, and waits for the response
-/// on the oneshot channel. The actual JSON-RPC result is returned to the
-/// HTTP client.
-///
-/// For notifications (messages without an `id`), this handler routes the
-/// message and returns `202 Accepted` immediately.
-#[allow(clippy::too_many_lines)]
 async fn handle_post(
     State(state): State<Arc<HttpState>>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+    body: Bytes,
+) -> Response {
     debug!("Received POST request");
 
-    // Parse the JSON-RPC message
-    let message: JsonRpcMessage = match serde_json::from_value(body.clone()) {
-        Ok(msg) => msg,
-        Err(e) => {
-            warn!(error = %e, "Failed to parse JSON-RPC message from POST body");
-            return (
+    if let Some(resp) = host_or_origin_rejection(&state.config, &headers) {
+        return resp;
+    }
+
+    let message = match std::str::from_utf8(&body)
+        .map_err(|e| TransportError::Deserialization(format!("Invalid UTF-8: {e}")))
+        .and_then(decode_jsonrpc_message)
+    {
+        Ok(message) => message,
+        Err(TransportError::InvalidMessage(detail)) => {
+            return error_reply(
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {
-                        "code": -32700,
-                        "message": format!("Parse error: {e}")
-                    }
-                })),
-            );
+                JsonRpcError::invalid_request(Some(detail)),
+            )
+        }
+        Err(e) => {
+            return error_reply(
+                StatusCode::BAD_REQUEST,
+                JsonRpcError::parse_error(Some(e.to_string())),
+            )
         }
     };
 
-    // Create or retrieve session
-    let mut session_id_header = None;
-    if state.config.enable_sessions {
-        let existing_session_id = headers
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-
-        if let Some(ref sid) = existing_session_id {
-            let sessions = state.sessions.read().await;
-            if !sessions.contains_key(sid) {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": null,
-                        "error": {
-                            "code": -32600,
-                            "message": "Unknown session"
-                        }
-                    })),
-                );
-            }
-            session_id_header = Some(sid.clone());
-        } else if message.method() == Some("initialize") {
-            // Create a new session for initialize requests
-            let new_sid = uuid::Uuid::new_v4().to_string();
-            let mut sessions = state.sessions.write().await;
-            sessions.insert(
-                new_sid.clone(),
-                SessionState {
-                    id: new_sid.clone(),
-                    created_at: Instant::now(),
-                    last_active: Instant::now(),
-                },
-            );
-            session_id_header = Some(new_sid);
-            info!("Created new session");
-        }
+    if let Some(resp) = protocol_version_rejection(&headers) {
+        return resp;
     }
 
-    // Determine if this is a request (has id) or notification (no id)
-    let request_id_str = extract_request_id(&body);
+    let (session, created) = match resolve_session(&state, &headers, &message).await {
+        Ok(resolved) => resolved,
+        Err(resp) => return *resp,
+    };
 
-    if let Some(ref id_str) = request_id_str {
-        // This is a request -- set up a oneshot channel for the response
-        let (response_tx, response_rx) = oneshot::channel();
-
-        {
-            let mut pending = state.pending_responses.lock().await;
-            pending.insert(id_str.clone(), response_tx);
-        }
-
-        // Route the message to the server
-        if let Err(e) = state.incoming_tx.send(message).await {
-            warn!(error = %e, "Failed to route incoming message");
-            // Clean up the pending response
-            let mut pending = state.pending_responses.lock().await;
-            pending.remove(id_str);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {
-                        "code": -32603,
-                        "message": "Internal error"
-                    }
-                })),
-            );
-        }
-
-        // Wait for the response from the server, with a 30-second timeout
-        // to prevent the HTTP handler from hanging indefinitely.
-        match tokio::time::timeout(Duration::from_secs(30), response_rx).await {
-            Ok(Ok(response_msg)) => {
-                let response_json = serde_json::to_value(&response_msg).unwrap_or_else(|_| {
-                    serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": null,
-                        "error": {
-                            "code": -32603,
-                            "message": "Failed to serialize response"
-                        }
-                    })
-                });
-
-                // Note: In a full implementation, we would set Mcp-Session-Id header.
-                // For now, return the response with 200 OK.
-                let _ = session_id_header; // used in future header setting
-                (StatusCode::OK, Json(response_json))
+    let mut response = match message {
+        JsonRpcMessage::Request(request) => forward_request(&state, session.clone(), request).await,
+        JsonRpcMessage::Notification(notification) => {
+            let message = rewrite_cancellation(&state, session.as_ref(), notification).await;
+            if state.incoming_tx.send(message).await.is_err() {
+                return server_gone();
             }
-            Ok(Err(_)) => {
-                // The server dropped the sender without sending a response
-                warn!("Server did not send a response for request");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": null,
-                        "error": {
-                            "code": -32603,
-                            "message": "Internal error: no response from server"
-                        }
-                    })),
-                )
-            }
-            Err(_) => {
-                // Timeout waiting for the server to respond
-                warn!("Timeout waiting for server response (30s)");
-                // Clean up the pending response entry
-                let mut pending = state.pending_responses.lock().await;
-                pending.remove(id_str);
-                (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": body.get("id").cloned().unwrap_or(serde_json::Value::Null),
-                        "error": {
-                            "code": -32603,
-                            "message": "Request timed out"
-                        }
-                    })),
-                )
-            }
+            accepted()
         }
-    } else {
-        // This is a notification -- route it and return 202 Accepted
-        if let Err(e) = state.incoming_tx.send(message).await {
-            warn!(error = %e, "Failed to route notification");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {
-                        "code": -32603,
-                        "message": "Internal error"
-                    }
-                })),
-            );
-        }
+        // The server does not send requests, so client responses are
+        // acknowledged and dropped.
+        JsonRpcMessage::Response(_) | JsonRpcMessage::ErrorResponse(_) => accepted(),
+    };
 
-        (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": null,
-                "result": {}
-            })),
-        )
+    if created {
+        if let Some(value) = session.and_then(|sid| HeaderValue::from_str(&sid).ok()) {
+            response.headers_mut().insert(SESSION_HEADER, value);
+        }
+    }
+    response
+}
+
+fn server_gone() -> Response {
+    warn!("MCP server is not receiving messages");
+    error_reply(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        JsonRpcError::internal_error(Some("Server unavailable".to_string())),
+    )
+}
+
+/// Forwards a request to the server under a transport-assigned id and waits
+/// for its response.
+async fn forward_request(
+    state: &HttpState,
+    session: Option<String>,
+    mut request: crate::protocol::types::JsonRpcRequest,
+) -> Response {
+    let client_id = std::mem::replace(
+        &mut request.id,
+        RequestId::String(format!(
+            "http-{}",
+            state.next_id.fetch_add(1, Ordering::Relaxed)
+        )),
+    );
+    let server_id = request.id.to_string();
+    let (respond, response_rx) = oneshot::channel();
+    {
+        let mut in_flight = state.in_flight.lock().await;
+        in_flight
+            .by_client_id
+            .insert((session.clone(), client_id.to_string()), server_id.clone());
+        in_flight.by_server_id.insert(
+            server_id.clone(),
+            PendingRequest {
+                client_id: client_id.clone(),
+                session: session.clone(),
+                respond,
+            },
+        );
+    }
+
+    if state
+        .incoming_tx
+        .send(JsonRpcMessage::Request(request))
+        .await
+        .is_err()
+    {
+        forget(state, &server_id).await;
+        return server_gone();
+    }
+
+    match tokio::time::timeout(RESPONSE_TIMEOUT, response_rx).await {
+        Ok(Ok(response)) => json_reply(StatusCode::OK, &response),
+        // The pending entry was dropped because the client cancelled the
+        // request: a cancelled request gets no response.
+        Ok(Err(_)) => (StatusCode::ACCEPTED, Body::empty()).into_response(),
+        Err(_) => {
+            warn!("Timeout waiting for server response");
+            forget(state, &server_id).await;
+            json_reply(
+                StatusCode::GATEWAY_TIMEOUT,
+                &JsonRpcMessage::error_response(
+                    client_id,
+                    JsonRpcError::internal_error(Some("Request timed out".to_string())),
+                ),
+            )
+        }
     }
 }
 
-/// Handles GET requests for SSE notification streams.
-async fn handle_get(State(_state): State<Arc<HttpState>>) -> impl IntoResponse {
-    info!("SSE stream requested via GET");
-    // In a full implementation, this would return an SSE stream.
-    // For Phase 1, we return 405 Method Not Allowed since SSE is P2.
-    StatusCode::METHOD_NOT_ALLOWED
+async fn forget(state: &HttpState, server_id: &str) {
+    let mut in_flight = state.in_flight.lock().await;
+    if let Some(p) = in_flight.by_server_id.remove(server_id) {
+        in_flight
+            .by_client_id
+            .remove(&(p.session, p.client_id.to_string()));
+    }
+}
+
+/// Points a client's `notifications/cancelled` at the transport-assigned id
+/// the server knows, and releases the waiting POST.
+async fn rewrite_cancellation(
+    state: &HttpState,
+    session: Option<&String>,
+    mut notification: crate::protocol::types::JsonRpcNotification,
+) -> JsonRpcMessage {
+    if notification.method == "notifications/cancelled" {
+        let client_id = notification
+            .params
+            .as_ref()
+            .and_then(|p| p.get("requestId"))
+            .and_then(|id| serde_json::from_value::<RequestId>(id.clone()).ok());
+        if let Some(client_id) = client_id {
+            let mut in_flight = state.in_flight.lock().await;
+            if let Some(server_id) = in_flight
+                .by_client_id
+                .remove(&(session.cloned(), client_id.to_string()))
+            {
+                // Dropping the sender releases the POST without a body.
+                in_flight.by_server_id.remove(&server_id);
+                if let Some(params) = notification.params.as_mut() {
+                    params["requestId"] = serde_json::Value::String(server_id);
+                }
+            }
+        }
+    }
+    JsonRpcMessage::Notification(notification)
+}
+
+/// Handles GET requests: this transport offers no SSE stream, which the
+/// specification answers with 405 Method Not Allowed.
+async fn handle_get(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> Response {
+    if let Some(resp) = host_or_origin_rejection(&state.config, &headers) {
+        return resp;
+    }
+    debug!("GET stream requested; not offered");
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(header::ALLOW, HeaderValue::from_static("POST, DELETE"))],
+    )
+        .into_response()
 }
 
 /// Handles DELETE requests for session termination.
-async fn handle_delete(
-    State(state): State<Arc<HttpState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let session_id = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
-
-    if let Some(sid) = session_id {
-        let mut sessions = state.sessions.write().await;
-        if sessions.remove(sid).is_some() {
-            info!(session_id = %sid, "Session terminated");
-            StatusCode::NO_CONTENT
-        } else {
-            warn!(session_id = %sid, "Attempted to delete unknown session");
-            StatusCode::NOT_FOUND
-        }
-    } else {
+async fn handle_delete(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> Response {
+    if let Some(resp) = host_or_origin_rejection(&state.config, &headers) {
+        return resp;
+    }
+    let Some(sid) = headers.get(SESSION_HEADER).and_then(|v| v.to_str().ok()) else {
         warn!("DELETE request missing Mcp-Session-Id header");
-        StatusCode::BAD_REQUEST
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if state.sessions.write().await.remove(sid).is_some() {
+        info!(session_id = %sid, "Session terminated");
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        warn!(session_id = %sid, "Attempted to delete unknown session");
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 
@@ -553,7 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_notification_returns_accepted() {
-        let transport = HttpTransport::new();
+        let transport = HttpTransport::builder().enable_sessions(false).build();
         let router = transport.router();
 
         let notification = serde_json::json!({
@@ -620,48 +820,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_request_with_response() {
-        // Test that a request gets routed and the response is returned
-        let transport = HttpTransport::new();
-        let transport_state = Arc::clone(&transport.state);
+        // A request is forwarded under a transport-assigned id, and the
+        // response comes back with the client's id restored.
+        let mut transport = HttpTransport::builder().enable_sessions(false).build();
         let router = transport.router();
-
-        // Spawn a task that reads from the transport and sends a response
-        let state_clone = Arc::clone(&transport_state);
-        tokio::spawn(async move {
-            // Wait for the incoming message
-            let mut incoming_rx = transport.incoming_rx.lock().await;
-            if let Some(msg) = incoming_rx.recv().await {
-                // Send back a response through the pending response channel
-                if let Some(id) = msg.id() {
-                    let id_str = id.to_string();
-                    let mut pending = state_clone.pending_responses.lock().await;
-                    if let Some(sender) = pending.remove(&id_str) {
-                        let response = JsonRpcMessage::response(
-                            id.clone(),
-                            serde_json::json!({"status": "ok"}),
-                        );
-                        let _ = sender.send(response);
-                    }
-                }
-            }
-        });
-
-        let init_request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "ping"
-        });
 
         let request = Request::builder()
             .method("POST")
             .uri("/mcp")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&init_request).unwrap()))
+            .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+            .unwrap();
+        let call = tokio::spawn(router.oneshot(request));
+
+        let forwarded = transport.recv().await.unwrap().expect("forwarded request");
+        let server_id = forwarded.id().cloned().expect("request id");
+        assert_ne!(server_id, RequestId::Number(1));
+        transport
+            .send(&JsonRpcMessage::response(
+                server_id,
+                serde_json::json!({"status": "ok"}),
+            ))
+            .await
             .unwrap();
 
-        let response = router.oneshot(request).await.unwrap();
+        let response = call.await.unwrap().unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();

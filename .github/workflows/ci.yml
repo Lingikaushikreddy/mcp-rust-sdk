@@ -90,3 +90,32 @@ jobs:
       - uses: codecov/codecov-action@v4
         with:
           files: lcov.info
+
+  conformance:
+    name: MCP Conformance (2025-11-25)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the official conformance suite (pinned)
+        run: |
+          git clone https://github.com/modelcontextprotocol/conformance.git "$RUNNER_TEMP/conformance"
+          cd "$RUNNER_TEMP/conformance"
+          git checkout c37eec888e1c6ff140af79987a40008548b7cc5f
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Start the conformance fixture
+        run: |
+          cargo build -p mcp-example-conformance
+          target/debug/mcp-example-conformance http 8091 &
+          timeout 30 bash -c 'until (echo > /dev/tcp/127.0.0.1/8091) 2>/dev/null; do sleep 0.5; done'
+      - name: Run the 2025-11-25 requirements
+        run: |
+          node "$RUNNER_TEMP/conformance/dist/index.js" server \
+            --url http://127.0.0.1:8091/mcp \
+            --requirements 2025-11-25 \
+            --expected-failures examples/conformance/expected-failures.yml

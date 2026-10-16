@@ -1,0 +1,17 @@
+[package]
+name = "mcp-example-conformance"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+mcp-sdk = { path = "../../crates/mcp-sdk", features = ["full"] }
+tokio = { workspace = true, features = ["time"] }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
