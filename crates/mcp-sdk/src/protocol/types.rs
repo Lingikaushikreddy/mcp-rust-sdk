@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::error::JsonRpcError;
+use crate::types::error::{JsonRpcError, TransportError};
 
 /// The JSON-RPC version string, always "2.0".
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -76,7 +76,18 @@ impl JsonRpcMessage {
     pub fn error_response(id: RequestId, error: JsonRpcError) -> Self {
         Self::ErrorResponse(JsonRpcErrorResponse {
             jsonrpc: JSONRPC_VERSION.to_string(),
-            id,
+            id: Some(id),
+            error,
+        })
+    }
+
+    /// Creates a JSON-RPC error response with no `id`, for errors where the
+    /// request id could not be read (parse errors and invalid requests).
+    #[must_use]
+    pub fn error_response_without_id(error: JsonRpcError) -> Self {
+        Self::ErrorResponse(JsonRpcErrorResponse {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: None,
             error,
         })
     }
@@ -97,7 +108,7 @@ impl JsonRpcMessage {
         match self {
             Self::Request(r) => Some(&r.id),
             Self::Response(r) => Some(&r.id),
-            Self::ErrorResponse(r) => Some(&r.id),
+            Self::ErrorResponse(r) => r.id.as_ref(),
             Self::Notification(_) => None,
         }
     }
@@ -143,8 +154,10 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcErrorResponse {
     /// The JSON-RPC version, always "2.0".
     pub jsonrpc: String,
-    /// The request ID this error response corresponds to.
-    pub id: RequestId,
+    /// The request ID this error response corresponds to. Absent when the
+    /// request's id could not be read (MCP 2025-11-25 `basic/index.mdx`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<RequestId>,
     /// The error object.
     pub error: JsonRpcError,
 }
@@ -174,7 +187,29 @@ pub struct JsonRpcNotification {
 pub fn parse_jsonrpc_message(json: &str) -> Result<JsonRpcMessage, String> {
     let value: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("Invalid JSON: {e}"))?;
+    jsonrpc_message_from_value(value)
+}
 
+/// Decodes one wire message, separating invalid JSON
+/// ([`TransportError::Deserialization`], JSON-RPC -32700) from JSON that is
+/// not a valid JSON-RPC 2.0 message ([`TransportError::InvalidMessage`],
+/// JSON-RPC -32600).
+///
+/// # Errors
+///
+/// Returns the matching [`TransportError`] variant when decoding fails.
+pub fn decode_jsonrpc_message(json: &str) -> Result<JsonRpcMessage, TransportError> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| TransportError::Deserialization(format!("Invalid JSON: {e}")))?;
+    jsonrpc_message_from_value(value).map_err(TransportError::InvalidMessage)
+}
+
+/// Classifies an already-parsed JSON value as a JSON-RPC 2.0 message.
+///
+/// # Errors
+///
+/// Returns an error string if the value is not a valid JSON-RPC 2.0 message.
+pub fn jsonrpc_message_from_value(value: serde_json::Value) -> Result<JsonRpcMessage, String> {
     let obj = value
         .as_object()
         .ok_or_else(|| "JSON-RPC message must be an object".to_string())?;
@@ -201,7 +236,7 @@ pub fn parse_jsonrpc_message(json: &str) -> Result<JsonRpcMessage, String> {
         let response: JsonRpcResponse =
             serde_json::from_value(value).map_err(|e| format!("Invalid response: {e}"))?;
         Ok(JsonRpcMessage::Response(response))
-    } else if has_id && has_error {
+    } else if has_error && !has_method && !has_result {
         // Error response
         let error_response: JsonRpcErrorResponse =
             serde_json::from_value(value).map_err(|e| format!("Invalid error response: {e}"))?;

@@ -153,10 +153,20 @@ async fn test_tool_error_handling() {
     let input = format!("{}{}\n", init_handshake(), tool_call);
     let output = run_server_with_input(&input).await;
     let output_str = String::from_utf8(output).expect("utf8");
+    let response: serde_json::Value = output_str
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("json"))
+        .find(|m| m["id"] == 2)
+        .expect("tools/call response");
 
-    // Should contain an error response
-    assert!(output_str.contains("error"));
-    assert!(output_str.contains("Intentional failure"));
+    // A failing tool is a tool execution error: a result with isError, not a
+    // JSON-RPC error (2025-11-25 server/tools.mdx).
+    assert!(response.get("error").is_none());
+    assert_eq!(response["result"]["isError"], true);
+    assert!(response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Intentional failure"));
 }
 
 #[tokio::test]
