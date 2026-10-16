@@ -6,6 +6,7 @@ members = [
     "examples/calculator",
     "examples/filesystem",
     "examples/database",
+    "examples/conformance",
     "benches",
 ]
 
