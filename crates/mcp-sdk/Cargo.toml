@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "A high-performance Rust SDK for building Model Context Protocol (MCP) servers"
+description = "A Rust SDK for building Model Context Protocol (MCP) servers"
 
 [features]
 default = ["macros", "stdio"]
