@@ -168,13 +168,25 @@ observations, not reported upstream.
 
 ## Fuzzing
 
-`fuzz/` holds three `cargo-fuzz` targets, each run for 15 minutes:
+`fuzz/` holds three `cargo-fuzz` targets. Each ran for 15 minutes (900 s) on
+2026-10-16 with seeds taken from the recorded client sessions:
 
-- `decode_message`: the JSON-RPC decoder never panics, and accepted messages round-trip.
-- `stdio_session`: arbitrary stdin never crashes or hangs the server, and every stdout line is a valid JSON-RPC message.
-- `http_post`: arbitrary bodies, session ids, version headers, Origin and Host never crash or hang a POST; 202 has no body, and every other body is a valid JSON-RPC message.
+| Target | Checks | Runs | Result |
+|---|---|---|---|
+| `stdio_session` | Arbitrary stdin never crashes or hangs the server; every stdout line is a valid JSON-RPC message (basic/transports.mdx:33) | 4.08 M | No failures |
+| `http_post` | Arbitrary bodies, session ids, version headers, `Origin` and `Host` never crash or hang a POST; 202 has no body; every other body is a valid JSON-RPC message | 19.4 M | No failures |
+| `decode_message` | The decoder never panics, and an accepted message survives encode then decode unchanged | 24.5 M | **1 finding**, below |
 
-Results are in the pull request that introduced this document.
+**Finding: float precision.** `serde_json`'s default number parser is not
+correctly rounded. Parsing the integer literal `1111111111111111111111118` and
+then re-parsing the shortest output, `1.1111111111111111e24`, gives values that
+differ by one unit in the last place. Some float literals sent by a client
+therefore reach a tool's `arguments` off by 1 ULP. This does not violate MCP or
+JSON (RFC 8259 leaves number precision to implementations), so it is not fixed
+here. Enabling `serde_json`'s `float_roundtrip` feature in `mcp-sdk` removes
+it: the same input passes with the feature on. The `decode_message` target
+keeps the strict round-trip check, so it reproduces the finding until the
+feature is enabled.
 
 ## Newer revision
 
@@ -191,4 +203,6 @@ stdio) and the client falls back to `initialize`, which is the downgrade path
 - Official suite: run `cargo run -p mcp-example-conformance -- http 8091`, then
   `npx @modelcontextprotocol/conformance server --url http://127.0.0.1:8091/mcp --requirements 2025-11-25`
   (built from source at the pinned commit; the npm `latest` tag predates `--requirements`).
+- CI: the `MCP Conformance (2025-11-25)` job runs the official suite on every
+  pull request, with `examples/conformance/expected-failures.yml` as the baseline.
 - Fuzzing: `cd fuzz && cargo +nightly fuzz run <target> -- -max_total_time=900`.
