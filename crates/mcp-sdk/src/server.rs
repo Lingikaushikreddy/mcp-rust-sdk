@@ -44,7 +44,7 @@ use crate::handler::prompts::{PromptHandler, PromptRegistry};
 use crate::handler::resources::{ResourceHandler, ResourceRegistry};
 use crate::handler::tools::{ToolHandler, ToolRegistry};
 use crate::protocol::capabilities::{
-    ServerCapabilities, ServerCapabilitiesBuilder, PROTOCOL_VERSION,
+    ServerCapabilities, ServerCapabilitiesBuilder, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use crate::protocol::messages::{
     methods, CallToolParams, GetPromptParams, GetPromptResult, Implementation, InitializeParams,
@@ -55,9 +55,6 @@ use crate::protocol::types::{JsonRpcMessage, JsonRpcNotification, JsonRpcRequest
 use crate::transport::McpTransport;
 use crate::types::content::{CallToolResult, Content};
 use crate::types::error::{JsonRpcError, McpError, TransportError};
-
-/// Supported protocol versions.
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2024-11-05"];
 
 /// Builder for constructing an [`McpServer`].
 ///
