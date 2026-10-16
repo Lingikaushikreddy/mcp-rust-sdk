@@ -17,9 +17,16 @@ documentation, tests, and benchmarks as fixtures.
 ## Features
 
 - **Ergonomic API** -- Builder pattern and `#[mcp_tool]`, `#[mcp_resource]`, `#[mcp_prompt]` proc macros
-- **MCP protocol** -- targets protocol version 2025-11-25 over JSON-RPC 2.0 (tools, resources, prompts)
-- **Multiple transports** -- stdio (for Claude Desktop/Cursor) and Streamable HTTP POST (for remote servers)
-- **Type-safe** -- Compile-time JSON Schema generation from Rust types
+- **MCP 2025-11-25 server** -- lifecycle, tools (with annotations), resources, prompts, ping and
+  cancellation over JSON-RPC 2.0. Checked requirement by requirement in
+  [docs/CONFORMANCE.md](docs/CONFORMANCE.md): it passes 62 of 72 checks in the official
+  conformance suite's 2025-11-25 requirements, and every failing check is an optional feature
+  listed under [Known Limitations](#known-limitations).
+- **Two transports** -- stdio and Streamable HTTP (JSON responses, sessions, `Host`/`Origin`
+  validation). Both are exercised by recorded sessions from MCP Inspector and Claude Code.
+- **Concurrent requests** -- tool calls, resource reads and prompt gets run as tasks, so pings
+  are answered and cancellations take effect while they run
+- **Generated input schemas** -- `#[mcp_tool]` builds a tool's JSON Schema at compile time from its parameter types
 - **Observable** -- structured logging via `tracing`, typed errors, and no `unsafe` code
 
 ## Quick Start
@@ -85,6 +92,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Serving over HTTP
+
+Enable the `http` feature and add `axum = "0.7"`. Then serve the transport's
+router with Axum and run the server on the same transport:
+
+```rust,ignore
+use mcp_sdk::prelude::*;
+use mcp_sdk::transport::http::HttpTransport;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Binds 127.0.0.1:3000 and accepts only local Host/Origin headers by default.
+    // Add your public host name with `.allowed_hosts(["mcp.example.com"])`.
+    let transport = HttpTransport::builder().build();
+    let listener = tokio::net::TcpListener::bind(transport.bind_addr()).await?;
+    let router = transport.router();
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    McpServer::builder().name("calculator").tool(AddTool).build().run(transport).await?;
+    Ok(())
+}
+```
+
+Tool handlers report failures by returning `Err(ToolError::...)`. The server sends
+these to the client as a tool result with `isError: true`, so the model can read
+the message and retry, as the specification asks. Only an unknown tool name
+becomes a JSON-RPC error.
 
 ### Using Proc Macros
 
@@ -189,7 +224,10 @@ mcp-rust-sdk/
     calculator/    -- Basic arithmetic MCP server
     filesystem/    -- File system operations MCP server
     database/      -- In-memory key-value database MCP server
+    conformance/   -- Fixture for the official MCP conformance suite, plus recorded client sessions
   benches/         -- Performance benchmarks
+  fuzz/            -- cargo-fuzz targets for the JSON-RPC decoder and both transports
+  docs/            -- CONFORMANCE.md
 ```
 
 ### Crate Features
@@ -199,7 +237,7 @@ mcp-rust-sdk/
 | `macros` | Yes | `#[mcp_tool]`, `#[mcp_resource]`, `#[mcp_prompt]` proc macros |
 | `stdio` | Yes | stdio transport (for Claude Desktop, Cursor, etc.) |
 | `http` | No | Streamable HTTP transport (Axum-based) |
-| `sse` | No | Server-Sent Events streaming (implies `http`; GET stream not implemented yet) |
+| `sse` | No | SSE event types (`SseEvent`, `SseManager`); implies `http`. Not used by the HTTP transport, which answers with JSON |
 | `full` | No | All features enabled |
 
 ## Examples
@@ -259,17 +297,47 @@ cargo fmt --all
 
 ## Known Limitations
 
-- The HTTP transport handles POST requests; the GET/SSE stream returns `405` for now.
-- Requests are processed sequentially per connection.
-- Server-side only -- there is no MCP client yet.
-- Pagination, resource subscriptions, sampling and cancellation are not implemented.
+- Server-side only -- there is no MCP client.
+- The server cannot send messages of its own: no log or progress notifications,
+  no `listChanged` notifications, no sampling or elicitation requests. Over HTTP,
+  every request is answered with one JSON response and GET returns `405`
+  (allowed by the specification); there are no SSE streams or resumability.
+- Not implemented: completions, resource subscriptions, pagination, audio and
+  resource-link content, `structuredContent`/`outputSchema`, tool `title`/`icons`,
+  tasks, and OAuth authorization.
+- HTTP `session_timeout` and `max_sessions` are accepted but not enforced yet.
+- `resources/read` for an unknown URI returns `-32602`. The 2025-11-25 text
+  suggests `-32002`, but the next revision standardizes on `-32602`
+  ([details](docs/CONFORMANCE.md#resources-and-prompts)).
 
-See [AUDIT_REPORT.md](AUDIT_REPORT.md) for the full list of open items.
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md) lists every requirement checked, with
+the spec line and the test or recording that backs it.
 
 ## Supported MCP Protocol Versions
 
-- **2025-11-25** -- primary target
-- **2024-11-05** -- accepted during version negotiation
+- **2025-11-25** -- primary target. A client asking for any other version except
+  2024-11-05 is offered 2025-11-25.
+- **2024-11-05** -- echoed back during negotiation so older stdio clients can connect.
+  The responses use the 2025-11-25 shapes, and that version's HTTP+SSE transport
+  is not offered.
+- **2026-07-28** (the newest revision) -- not supported. Its stateless
+  `server/discover` probe is rejected, and clients that implement the revision's
+  downgrade path, such as Claude Code, fall back to `initialize`.
+
+## How this differs from rmcp
+
+[`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) is the official Rust SDK,
+maintained under the Model Context Protocol organization. It implements both the
+client and the server side, tracks the newest protocol revision, and covers most
+of the features listed above as missing here. If you need an MCP SDK in Rust for
+production, use rmcp. This project is a smaller, server-only SDK. It offers a
+builder plus hand-written handler traits
+and three proc macros, and over HTTP it answers each request with plain JSON
+instead of an SSE stream. Its value is mostly its record:
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md) checks it line by line against the
+2025-11-25 specification, the official conformance suite, rmcp and the TypeScript
+SDK. That record shows where it conforms, where it does not, and which features it
+lacks.
 
 ## License
 
