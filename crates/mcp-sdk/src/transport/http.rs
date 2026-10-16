@@ -331,11 +331,10 @@ impl McpTransport for HttpTransport {
             }
             pending
         };
-        match pending {
-            Some(p) => {
-                let _ = p.respond.send(with_id(message.clone(), p.client_id));
-            }
-            None => debug!(id = %server_id, "No pending HTTP request for response"),
+        if let Some(p) = pending {
+            let _ = p.respond.send(with_id(message.clone(), p.client_id));
+        } else {
+            debug!(id = %server_id, "No pending HTTP request for response");
         }
         Ok(())
     }
@@ -411,10 +410,8 @@ fn host_name(authority: &str) -> &str {
 /// DNS rebinding protection: `Host` and, when present, `Origin` must name an
 /// allowed host. 2025-11-25 basic/transports.mdx: "Servers MUST validate the
 /// Origin header on all incoming connections".
-fn check_host_and_origin(config: &HttpConfig, headers: &HeaderMap) -> Result<(), Response> {
-    let Some(allowed) = &config.allowed_hosts else {
-        return Ok(());
-    };
+fn host_or_origin_rejection(config: &HttpConfig, headers: &HeaderMap) -> Option<Response> {
+    let allowed = config.allowed_hosts.as_ref()?;
     let is_allowed = |name: &str| allowed.iter().any(|a| a.eq_ignore_ascii_case(name));
     let forbidden = |what: &str, value: &str| {
         warn!(%what, %value, "Rejected request from a host that is not allowed");
@@ -427,7 +424,7 @@ fn check_host_and_origin(config: &HttpConfig, headers: &HeaderMap) -> Result<(),
     if let Some(host) = headers.get(header::HOST) {
         let host = host.to_str().unwrap_or_default();
         if !is_allowed(host_name(host)) {
-            return Err(forbidden("Host", host));
+            return Some(forbidden("Host", host));
         }
     }
     if let Some(origin) = headers.get(header::ORIGIN) {
@@ -436,23 +433,21 @@ fn check_host_and_origin(config: &HttpConfig, headers: &HeaderMap) -> Result<(),
             .split_once("://")
             .map(|(_, rest)| rest.split('/').next().unwrap_or(rest));
         if !authority.is_some_and(|a| is_allowed(host_name(a))) {
-            return Err(forbidden("Origin", origin));
+            return Some(forbidden("Origin", origin));
         }
     }
-    Ok(())
+    None
 }
 
 /// 2025-11-25 basic/transports.mdx: an invalid or unsupported
 /// `MCP-Protocol-Version` gets 400. A missing header is accepted.
-fn check_protocol_version(headers: &HeaderMap) -> Result<(), Response> {
-    let Some(version) = headers.get(PROTOCOL_VERSION_HEADER) else {
-        return Ok(());
-    };
+fn protocol_version_rejection(headers: &HeaderMap) -> Option<Response> {
+    let version = headers.get(PROTOCOL_VERSION_HEADER)?;
     let version = version.to_str().unwrap_or_default();
     if SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
-        return Ok(());
+        return None;
     }
-    Err(error_reply(
+    Some(error_reply(
         StatusCode::BAD_REQUEST,
         JsonRpcError::invalid_request(Some(format!(
             "Unsupported MCP-Protocol-Version: {version} (supported: {})",
@@ -512,7 +507,7 @@ async fn handle_post(
 ) -> Response {
     debug!("Received POST request");
 
-    if let Err(resp) = check_host_and_origin(&state.config, &headers) {
+    if let Some(resp) = host_or_origin_rejection(&state.config, &headers) {
         return resp;
     }
 
@@ -535,7 +530,7 @@ async fn handle_post(
         }
     };
 
-    if let Err(resp) = check_protocol_version(&headers) {
+    if let Some(resp) = protocol_version_rejection(&headers) {
         return resp;
     }
 
@@ -676,7 +671,7 @@ async fn rewrite_cancellation(
 /// Handles GET requests: this transport offers no SSE stream, which the
 /// specification answers with 405 Method Not Allowed.
 async fn handle_get(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> Response {
-    if let Err(resp) = check_host_and_origin(&state.config, &headers) {
+    if let Some(resp) = host_or_origin_rejection(&state.config, &headers) {
         return resp;
     }
     debug!("GET stream requested; not offered");
@@ -689,7 +684,7 @@ async fn handle_get(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> 
 
 /// Handles DELETE requests for session termination.
 async fn handle_delete(State(state): State<Arc<HttpState>>, headers: HeaderMap) -> Response {
-    if let Err(resp) = check_host_and_origin(&state.config, &headers) {
+    if let Some(resp) = host_or_origin_rejection(&state.config, &headers) {
         return resp;
     }
     let Some(sid) = headers.get(SESSION_HEADER).and_then(|v| v.to_str().ok()) else {
